@@ -17,6 +17,7 @@ export default defineConfig(
 		'scripts/diagnose-graph.ts',
 		'scripts/test-edge-types.ts',
 		'scripts/embed-wasm.mjs',
+		'scripts/copy-wasm.mjs',
 	]),
 	{
 		languageOptions: {

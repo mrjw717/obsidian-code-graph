@@ -13,65 +13,19 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === 'production';
 
-// The grammars actually used at runtime (hasSymbolExtraction: true languages).
-// Only these + the core runtime need to be on disk for dev mode. The rest are
-// never loaded. See src/indexer/profiles/registry.ts → TREE_SITTER_LANGS.
-const NEEDED_GRAMMARS = new Set([
-	'tree-sitter-typescript.wasm',
-	'tree-sitter-tsx.wasm',
-	'tree-sitter-javascript.wasm',
-	'tree-sitter-python.wasm',
-]);
-
-// Copy tree-sitter runtime + only the 4 used grammar WASMs into ./wasm next to
-// main.js so the plugin can load them at runtime via Node fs (dev mode). In
-// production, the embed-wasm script also bakes them into main.js as base64 so
-// fresh installs without a wasm/ directory still work.
-function copyWasmAssets() {
-	const destRoot = path.join(process.cwd(), 'wasm');
-	const grammarDest = path.join(destRoot, 'grammars');
-	// Wipe stale grammars first so a provider switch doesn't leave dead files.
-	fs.rmSync(grammarDest, { recursive: true, force: true });
-	fs.mkdirSync(grammarDest, { recursive: true });
-
-	const coreSrc = path.join('node_modules', 'web-tree-sitter', 'web-tree-sitter.wasm');
-	if (fs.existsSync(coreSrc)) {
-		fs.copyFileSync(coreSrc, path.join(destRoot, 'web-tree-sitter.wasm'));
-	} else {
-		console.warn('[wasm] core web-tree-sitter.wasm not found at', coreSrc);
+// Safety net: ensure wasm assets are copied and embedded before bundling.
+// package.json scripts call copy-wasm + embed-wasm first, but esbuild.config.mjs
+// may be invoked directly (e.g. by Obsidian's hot-reload).
+function ensureWasmReady() {
+	if (!fs.existsSync(path.join(process.cwd(), 'wasm', 'web-tree-sitter.wasm'))) {
+		try { execSync('node scripts/copy-wasm.mjs', { encoding: 'utf-8', stdio: 'pipe' }); } catch {}
 	}
-
-	const grammarDir = path.join(
-		'node_modules',
-		'@repomix',
-		'tree-sitter-wasms',
-		'out',
-	);
-	let count = 0;
-	if (fs.existsSync(grammarDir)) {
-		for (const file of fs.readdirSync(grammarDir)) {
-			if (file.endsWith('.wasm') && NEEDED_GRAMMARS.has(file)) {
-				fs.copyFileSync(path.join(grammarDir, file), path.join(grammarDest, file));
-				count++;
-			}
-		}
-	} else {
-		console.warn('[wasm] grammar dir not found at', grammarDir);
-	}
-	console.log(`[wasm] copied core + ${count} grammars to ${destRoot}`);
-}
-
-// Generate the embedded-wasm TypeScript module (base64 constants for the 5
-// needed wasm files) so production builds are self-contained.
-function embedWasm() {
-	try {
-		const output = execSync('node scripts/embed-wasm.mjs', { encoding: 'utf-8' });
-		console.log(output.trim());
-	} catch (err) {
-		console.warn('[embed-wasm] failed to generate embedded wasm module:', err?.message || err);
-		console.warn('[embed-wasm] production builds will not be self-contained.');
+	if (!fs.existsSync(path.join(process.cwd(), 'src', 'indexer', 'wasm-embedded.ts'))) {
+		try { execSync('node scripts/embed-wasm.mjs', { encoding: 'utf-8', stdio: 'pipe' }); } catch {}
 	}
 }
+
+ensureWasmReady();
 
 const context = await esbuild.context({
 	banner: {
@@ -95,7 +49,7 @@ const context = await esbuild.context({
 		'@lezer/lr',
 		...builtinModules,
 	],
-	format: 'cjs',
+		format: 'cjs',
 	target: 'es2021',
 	logLevel: 'info',
 	sourcemap: prod ? false : 'inline',
@@ -104,17 +58,9 @@ const context = await esbuild.context({
 	minify: prod,
 });
 
-// Always (re)copy WASM assets so a fresh checkout / clone works out of the box.
-copyWasmAssets();
-// Safety net: generate the embedded-wasm module if it doesn't exist yet
-// (package.json scripts call embed-wasm first, but esbuild.config.mjs may be
-// invoked directly).
-if (!fs.existsSync(path.join(process.cwd(), 'src', 'indexer', 'wasm-embedded.ts'))) {
-	embedWasm();
-}
+await context.rebuild();
 
 if (prod) {
-	await context.rebuild();
 	process.exit(0);
 } else {
 	await context.watch();
