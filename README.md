@@ -97,7 +97,7 @@ the rest come from the documentation protocol.
 
 > For per-edge optimization guidance — exactly what to write to maximize each
 > edge honestly — see **§5 Edge-maximization guide** in the
-> [skill guide](skills/obsidian-code-graph/skill.md).
+> [skill guide](https://github.com/mrjw717/obsidian-code-graph/blob/main/skills/obsidian-code-graph/SKILL.md).
 
 ## Node types
 
@@ -130,7 +130,7 @@ nodes.
 Each node also carries metadata the plugin surfaces: `domain`, `status`,
 `author` (hover tooltip), `tags`, `todoCount`/`fixmeCount` (orange/red glow),
 and `lines`/fan-in/fan-out (node sizing). Writing the `@tags` and frontmatter
-documented in the [skill guide](skills/obsidian-code-graph/skill.md) populates
+documented in the [skill guide](https://github.com/mrjw717/obsidian-code-graph/blob/main/skills/obsidian-code-graph/SKILL.md) populates
 all of this automatically.
 
 ---
@@ -150,12 +150,25 @@ all of this automatically.
 
 ## The documentation protocol
 
-The plugin ships an **AI-ready skill** — [`skills/obsidian-code-graph/skill.md`](skills/obsidian-code-graph/skill.md) —
+The plugin ships an **AI-ready skill** — [`skills/obsidian-code-graph/SKILL.md`](https://github.com/mrjw717/obsidian-code-graph/blob/main/skills/obsidian-code-graph/SKILL.md) —
 that tells AI agents (and humans) exactly how to write code comments, file
 headers, and markdown frontmatter so the graph extracts maximum semantic value.
 Load it into your AI coding agent, or read it directly. When code adheres to the
 protocol below, the graph populates automatically — every `@tag`, `[[link]]`,
 and frontmatter field becomes a typed edge or node attribute.
+
+**Install the skill into your AI agent** (works with any agent that supports the
+[skills.sh](https://skills.sh) format — Claude Code, Cursor, OpenCode, and
+others):
+
+```bash
+npx skills add mrjw717/obsidian-code-graph -g -y
+```
+
+Or browse/list before installing: `npx skills add mrjw717/obsidian-code-graph -l`.
+The skill loads the full protocol — tag reference, per-edge and per-node
+optimization guidance, language matrix, and a domain auto-detection procedure —
+into any compatible agent.
 
 **Code files** — Tier 1 header + typed links:
 
@@ -186,7 +199,7 @@ tags: [calculator, architecture]
 ---
 ```
 
-The [skill guide](skills/obsidian-code-graph/skill.md) contains the full tag
+The [skill guide](https://github.com/mrjw717/obsidian-code-graph/blob/main/skills/obsidian-code-graph/SKILL.md) contains the full tag
 reference, per-edge and per-node optimization guidance, the language support
 matrix, a domain auto-detection procedure for AI agents, and a verification
 checklist. **Point your AI agent at it** and it will detect your codebase's
@@ -203,7 +216,7 @@ domains, offer them as suggestions, and document files to maximize graph edges.
 
 The `@tag` / `[[wikilink]]` / `TODO` / `FIXME` / frontmatter protocol works in
 **any language** — only the structural edges differ. See the
-[skill guide](skills/obsidian-code-graph/skill.md#7-language-support-matrix) for
+[skill guide](https://github.com/mrjw717/obsidian-code-graph/blob/main/skills/obsidian-code-graph/SKILL.md#7-language-support-matrix) for
 details on adding a language to the full-structural tier.
 
 ---
