@@ -1,6 +1,5 @@
 import {
 	Plugin,
-	FileSystemAdapter,
 	TFile,
 	TAbstractFile,
 	WorkspaceLeaf,
@@ -13,7 +12,7 @@ import {
 	type CodeGraphSettings,
 } from './settings';
 import { CodeIndexer, type ExtractResult } from './indexer/CodeIndexer';
-import { setFsAccess } from './indexer/tree-sitter';
+import { setAdapterAccess } from './indexer/tree-sitter';
 import { CodeGraphView } from './ui/GraphView';
 import { mergeWithMdLinks } from './graph/merger';
 import { registerSeedDomainsCommand } from './commands/seedDomains';
@@ -35,9 +34,17 @@ export default class CodeGraphPlugin extends Plugin {
 		this.indexer = new CodeIndexer({
 			app: this.app,
 			getSettings: () => this.settings,
-			getPluginDir: () => this.getPluginDir(),
 		});
-		setFsAccess({ getPluginDir: () => this.getPluginDir() });
+		// Wire tree-sitter's wasm loader at the Obsidian vault adapter. Reading
+		// grammars via DataAdapter (instead of Node fs) keeps the plugin inside
+		// the sanctioned vault API and keeps every value strongly typed.
+		const pluginDirRel = this.manifest.dir;
+		if (pluginDirRel) {
+			setAdapterAccess({
+				adapter: this.app.vault.adapter,
+				pluginDirRel,
+			});
+		}
 
 		this.registerView(
 			VIEW_TYPE_CODE_GRAPH,
@@ -95,15 +102,6 @@ export default class CodeGraphPlugin extends Plugin {
 			});
 		}
 		if (leaf) await workspace.revealLeaf(leaf);
-	}
-
-	getPluginDir(): string {
-		const adapter = this.app.vault.adapter;
-		const dir = this.manifest.dir;
-		if (adapter instanceof FileSystemAdapter && dir) {
-			return adapter.getFullPath(dir);
-		}
-		throw new Error('[code-graph] requires the desktop filesystem adapter');
 	}
 
 	/**

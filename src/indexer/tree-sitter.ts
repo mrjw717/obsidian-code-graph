@@ -2,66 +2,105 @@
  * tree-sitter bootstrap.
  *
  * web-tree-sitter ships a core runtime wasm (`web-tree-sitter.wasm`) plus a
- * wasm grammar per language. Both are copied next to main.js by esbuild
- * (see esbuild.config.mjs) and read here via Node fs. Reading grammar bytes
- * directly avoids any file:// / fetch / CORS issues inside Obsidian.
+ * wasm grammar per language. Both live next to main.js under `<pluginDir>/wasm/`
+ * and are read here through the Obsidian vault adapter (DataAdapter).
  *
- * The plugin folder absolute path is supplied at runtime via setFsAccess().
+ * Reading grammar bytes via the sanctioned Obsidian API — instead of Node's
+ * `fs`/`path` — keeps the plugin fully within the vault API, removes any
+ * filesystem access outside it, and keeps every value strongly typed (the
+ * Node `fs` module resolves to `any` under type-aware analysis that lacks
+ * `@types/node`, which previously cascaded `any` into the web-tree-sitter
+ * calls).
  *
- * **Fallback:** if the `wasm/` directory is not present on disk (e.g. a fresh
- * install from a GitHub release that only ships main.js + manifest.json), the
- * embedded base64 bytes from `wasm-embedded.ts` are written to disk on first
- * access. This makes the plugin self-contained — no separate wasm download or
- * manual extraction step for end users.
+ * The plugin folder's vault-relative path is supplied at runtime via
+ * setAdapterAccess().
+ *
+ * **Fallback:** if a wasm file is missing on disk (e.g. a fresh install from a
+ * GitHub release that only ships main.js + manifest.json), the embedded base64
+ * bytes from `wasm-embedded.ts` are materialized via the adapter. This makes
+ * the plugin self-contained — no separate wasm download step for end users.
  */
 import { Parser, Language, type Tree } from 'web-tree-sitter';
-import fs from 'fs';
-import path from 'path';
+import type { DataAdapter } from 'obsidian';
 import { LANG_TO_GRAMMAR } from './profiles';
 import { getEmbeddedWasm } from './wasm-embedded';
 
-export interface FsAccess {
-	getPluginDir(): string;
+export interface AdapterAccess {
+	/** Obsidian vault adapter used for all wasm reads/writes. */
+	adapter: DataAdapter;
+	/** Vault-relative plugin folder, e.g. ".obsidian/plugins/code-graph". */
+	pluginDirRel: string;
 }
 
-let fsAccess: FsAccess | null = null;
+let access: AdapterAccess | null = null;
 let corePromise: Promise<void> | null = null;
 const languageCache = new Map<string, Language>();
 
-export function setFsAccess(access: FsAccess): void {
-	fsAccess = access;
+export function setAdapterAccess(a: AdapterAccess): void {
+	access = a;
 	corePromise = null;
 	languageCache.clear();
 }
 
-function pluginDir(): string {
-	if (!fsAccess) {
-		throw new Error('[code-graph] tree-sitter fsAccess not configured');
+function requireAccess(): AdapterAccess {
+	if (!access) {
+		throw new Error('[code-graph] tree-sitter adapter access not configured');
 	}
-	return fsAccess.getPluginDir();
+	return access;
 }
 
+/** Vault-relative path to the wasm directory. */
 function wasmRoot(): string {
-	return path.join(pluginDir(), 'wasm');
+	return `${requireAccess().pluginDirRel}/wasm`;
 }
 
 /**
- * Ensure a wasm file exists on disk. If it's missing, try to extract it from
- * the embedded base64 constants (generated at build time). This is the
- * self-contained-install fallback: a fresh GitHub release install has no
- * wasm/ directory, so we materialize the 5 needed files on first load.
+ * Ensure every parent segment of `fileRel` exists. The adapter's mkdir may not
+ * be recursive, so segments are created one at a time from the plugin root.
+ */
+async function ensureParentDir(fileRel: string): Promise<void> {
+	const slash = fileRel.lastIndexOf('/');
+	if (slash <= 0) return;
+	const parent = fileRel.slice(0, slash);
+	const segments = parent.split('/');
+	let acc = '';
+	for (const seg of segments) {
+		acc = acc ? `${acc}/${seg}` : seg;
+		const { adapter } = requireAccess();
+		if (!(await adapter.exists(acc))) {
+			try {
+				await adapter.mkdir(acc);
+			} catch {
+				// Race or already exists — safe to ignore.
+			}
+		}
+	}
+}
+
+/**
+ * Ensure a wasm file exists on disk. If missing, materialize it from the
+ * embedded base64 constants (generated at build time) via the adapter. This is
+ * the self-contained-install fallback: a fresh GitHub release install has no
+ * wasm/ directory, so we write the needed files on first load.
  *
  * Returns true if the file is available (was already there or just written);
  * false if it cannot be sourced from either disk or embedded bytes.
  */
-function ensureWasmFile(relativePath: string, filename: string): boolean {
-	const fullPath = path.join(relativePath);
-	if (fs.existsSync(fullPath)) return true;
+async function ensureWasmFile(relPath: string, filename: string): Promise<boolean> {
+	const { adapter } = requireAccess();
+	if (await adapter.exists(relPath)) return true;
 	const embedded = getEmbeddedWasm(filename);
 	if (!embedded) return false;
 	try {
-		fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-		fs.writeFileSync(fullPath, embedded);
+		await ensureParentDir(relPath);
+		// Copy the (possibly-viewed) Uint8Array into a standalone ArrayBuffer.
+		// getEmbeddedWasm() returns a Uint8Array allocated as `new Uint8Array(n)`
+		// (see wasm-embedded.ts decode()), so its underlying buffer is always a
+		// real ArrayBuffer of exactly the right length. `Uint8Array.buffer` is
+		// typed `ArrayBufferLike` (ArrayBuffer | SharedArrayBuffer); assert to
+		// the concrete ArrayBuffer the adapter expects.
+		const buffer = embedded.buffer as ArrayBuffer;
+		await adapter.writeBinary(relPath, buffer);
 		return true;
 	} catch (err: unknown) {
 		console.warn(`[code-graph] failed to write embedded wasm ${filename}:`, err);
@@ -73,13 +112,14 @@ function ensureWasmFile(relativePath: string, filename: string): boolean {
 function ensureCore(): Promise<void> {
 	if (corePromise) return corePromise;
 	corePromise = (async () => {
+		const { adapter } = requireAccess();
 		const root = wasmRoot();
-		const corePath = path.join(root, 'web-tree-sitter.wasm');
+		const corePath = `${root}/web-tree-sitter.wasm`;
 
 		// Fallback: extract from embedded bytes if not on disk.
-		ensureWasmFile(corePath, 'web-tree-sitter.wasm');
+		await ensureWasmFile(corePath, 'web-tree-sitter.wasm');
 
-		if (!fs.existsSync(corePath)) {
+		if (!(await adapter.exists(corePath))) {
 			throw new Error(
 				`[code-graph] tree-sitter core wasm not found at ${corePath}`,
 			);
@@ -87,21 +127,17 @@ function ensureCore(): Promise<void> {
 		// Pass the core wasm bytes directly. This sidesteps emscripten's
 		// environment detection, which can misfire inside Obsidian's Electron
 		// renderer and fall back to fetch() of a file:// URL (blocked by CORS).
-		const buf = fs.readFileSync(corePath);
-		const wasmBinary = buf.buffer.slice(
-			buf.byteOffset,
-			buf.byteOffset + buf.byteLength,
-		);
+		const wasmBinary = await adapter.readBinary(corePath);
 		// CRITICAL: provide locateFile so emscripten's findWasmBinary() uses
 		// our callback instead of `new URL("web-tree-sitter.wasm",
 		// import.meta.url)`. When esbuild bundles to CJS, import.meta is
 		// replaced with an empty object {}, so import.meta.url is undefined,
 		// and `new URL(file, undefined)` throws TypeError: Invalid URL —
-		// silently killing ALL tree-sitter parsing. The locateFile callback
-		// short-circuits that codepath entirely.
+		// silently killing ALL tree-sitter parsing. getResourcePath yields a
+		// renderer-usable URL (app://local/...) for any support file lookup.
 		await Parser.init({
 			wasmBinary,
-			locateFile: (file: string) => path.join(root, file),
+			locateFile: (file: string) => adapter.getResourcePath(`${root}/${file}`),
 		});
 	})();
 	return corePromise;
@@ -118,27 +154,28 @@ export async function loadLanguage(lang: string): Promise<Language | null> {
 	if (cached) return cached;
 	try {
 		await ensureCore();
-	} catch (err) {
+	} catch (err: unknown) {
 		console.error('[code-graph] tree-sitter core init failed:', err);
 		return null;
 	}
-	const wasmPath = path.join(wasmRoot(), 'grammars', grammar);
+	const { adapter } = requireAccess();
+	const wasmPath = `${wasmRoot()}/grammars/${grammar}`;
 
 	// Fallback: extract from embedded bytes if not on disk.
-	ensureWasmFile(wasmPath, grammar);
+	await ensureWasmFile(wasmPath, grammar);
 
-	if (!fs.existsSync(wasmPath)) {
+	if (!(await adapter.exists(wasmPath))) {
 		console.warn(
 			`[code-graph] grammar wasm not found: ${wasmPath} (lang=${lang})`,
 		);
 		return null;
 	}
 	try {
-		const bytes = fs.readFileSync(wasmPath);
+		const bytes = await adapter.readBinary(wasmPath);
 		const language = await Language.load(new Uint8Array(bytes));
 		languageCache.set(lang, language);
 		return language;
-	} catch (err) {
+	} catch (err: unknown) {
 		console.error(
 			'[code-graph] Language.load failed for %s (%s):',
 			lang,

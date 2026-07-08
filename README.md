@@ -161,8 +161,35 @@ adding a language to the full-structural tier.
 ## Requirements
 
 - **Obsidian 1.7.2 or later.**
-- **Desktop only.** The plugin uses Node's `fs` module to load tree-sitter
-  WASM grammars, which is not available in Obsidian's mobile environment.
+- **Desktop only.** The plugin parses source with tree-sitter WASM grammars,
+  which is a heavy, desktop-oriented workload that hasn't been validated on
+  mobile. (`isDesktopOnly: true` in the manifest.)
+
+---
+
+## Privacy & permissions
+
+Code Graph is **local-first**. It makes **no network requests** and collects
+**no telemetry** — all parsing and graph rendering happen entirely inside your
+vault. The permissions it does use:
+
+| Permission | Why |
+|------------|-----|
+| **Reads & writes vault files** | Reads your code/notes via the Obsidian vault API to extract relationships. |
+| **Enumerates vault files** | `vault.getFiles()` lists files to discover which ones are code/notes to graph. |
+| **Writes to its own plugin folder** | On first run, materializes the bundled tree-sitter WASM grammars into `.obsidian/plugins/code-graph/wasm/` so parsing works. |
+| **Clipboard (optional)** | The right-click **Copy path** action writes a file path to the clipboard. User-initiated only. |
+| **Bundled WASM / base64** | tree-sitter is embedded as base64 WASM inside `main.js` so fresh installs are self-contained. |
+
+No file outside the vault is read or written.
+
+> **Obsidian Sync note:** `main.js` is ~5.8 MB because the tree-sitter grammars
+> are embedded for self-contained installs. **Obsidian Sync Standard** (5 MB
+> file cap) will not sync it — use **Sync Plus** or another sync method.
+
+Each release ships with **GitHub artifact attestations** so `main.js`,
+`manifest.json`, and `styles.css` can be cryptographically verified against the
+source build.
 
 ---
 

@@ -12,7 +12,7 @@ import {
 	extractNoteTagsFromFrontmatter,
 	type FileTags,
 } from './tagExtractor';
-import { parseSource, setFsAccess } from './tree-sitter';
+import { parseSource } from './tree-sitter';
 import {
 	buildNameIndex,
 	buildSymbolTable,
@@ -38,7 +38,6 @@ import {
 export interface IndexerDeps {
 	app: App;
 	getSettings: () => CodeGraphSettings;
-	getPluginDir: () => string;
 }
 
 /** Pre-merge extraction: code/note nodes + code-derived edges (no md-links yet). */
@@ -113,7 +112,6 @@ export class CodeIndexer {
 	}
 
 	async extract(): Promise<ExtractResult> {
-		setFsAccess({ getPluginDir: this.deps.getPluginDir });
 		clearTsConfigCache();
 		const settings = this.deps.getSettings();
 		const files = this.deps.app.vault.getFiles();

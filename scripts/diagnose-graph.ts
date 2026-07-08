@@ -11,8 +11,9 @@
  */
 import fs from 'fs';
 import path from 'path';
+import type { DataAdapter } from 'obsidian';
 import { getProfile, EXTENSION_TO_LANG } from '../src/indexer/profiles';
-import { setFsAccess, parseSource } from '../src/indexer/tree-sitter';
+import { setAdapterAccess, parseSource } from '../src/indexer/tree-sitter';
 import {
 	buildSymbolTable,
 	buildSymbolIdTable,
@@ -33,8 +34,33 @@ const EXCLUDE_DIRS = new Set(['node_modules', '.next', '.git', '.turbo', 'dist',
 const CANDIDATE_EXTS = ['ts', 'tsx', 'js', 'jsx', 'py', 'css', 'c', 'h', 'cpp', 'cc', 'go', 'rs', 'java', 'lua', 'php'];
 
 async function main(): Promise<void> {
-	// 1. Point tree-sitter at the wasm dir.
-	setFsAccess({ getPluginDir: () => PLUGIN_DIR });
+	// 1. Point tree-sitter at the wasm dir. This script runs outside Obsidian,
+	//    so wrap Node fs in a DataAdapter-shaped shim that tree-sitter.ts
+	//    drives through the same code path the plugin uses in production.
+	const adapterShim = {
+		exists: (p: string) => Promise.resolve(fs.existsSync(p)),
+		readBinary: (p: string) => {
+			const buf = fs.readFileSync(p);
+			const ab = buf.buffer.slice(
+				buf.byteOffset,
+				buf.byteOffset + buf.byteLength,
+			) as ArrayBuffer;
+			return Promise.resolve(ab);
+		},
+		writeBinary: (p: string, data: ArrayBuffer) => {
+			fs.writeFileSync(p, Buffer.from(data));
+			return Promise.resolve();
+		},
+		mkdir: (p: string) => {
+			fs.mkdirSync(p, { recursive: true });
+			return Promise.resolve();
+		},
+		getResourcePath: (p: string) => p,
+	};
+	setAdapterAccess({
+		adapter: adapterShim as unknown as DataAdapter,
+		pluginDirRel: PLUGIN_DIR,
+	});
 
 	// 2. Walk code files.
 	const codeFiles: { abs: string; rel: string; ext: string; lang: string }[] = [];
