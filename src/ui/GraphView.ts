@@ -7,7 +7,11 @@ import type {
 } from 'vis-network/standalone';
 import type CodeGraphPlugin from '../main';
 import { VIEW_TYPE_CODE_GRAPH } from '../main';
-import type { NodeSizingMode, ColorMode } from '../settings';
+import type { NodeSizingMode, ColorMode, ColorGroup } from '../settings';
+import { applyFolderClustering, applyCommunityClustering, folderKey } from './clustering';
+import { discoverDomains } from '../commands/seedDomains';
+import { drawEdgeAnimation, shouldAnimateEdges } from './edgeAnimation';
+import type { EdgeAnimInfo } from './edgeAnimation';
 import {
 	ALL_EDGE_TYPES,
 	EDGE_STYLE,
@@ -164,29 +168,72 @@ function arrowsFor(arrow: EdgeArrow): VisEdge['arrows'] {
 	}
 }
 
-function edgeStyle(type: EdgeType, weight: number): Partial<VisEdge> {
+function edgeStyle(type: EdgeType, weight: number, roundnessOverride?: number, length?: number): Partial<VisEdge> {
 	const s = EDGE_STYLE[type];
 	// Scale within per-type [baseWidth, maxWidth]: weight 1 = base, weight 10+ = max
 	const t = Math.min(Math.max((weight - 1) / 9, 0), 1);
 	const width = s.baseWidth + t * (s.maxWidth - s.baseWidth);
-	return {
-		color: { color: s.color, opacity: 0.85 },
+
+	// Determine roundness: use override (for parallel-edge fan-out) or the
+	// per-type base. Clamp to a minimum absolute curvature so edges are NEVER
+	// straight — the user wants all edges to have visible curvature so they
+	// don't overlap by following the exact same path.
+	let roundness = roundnessOverride ?? s.roundness;
+	const MIN_CURVE = 0.15;
+	if (Math.abs(roundness) < MIN_CURVE) {
+		roundness = roundness >= 0 ? MIN_CURVE : -MIN_CURVE;
+	}
+	// Cap at ±0.5 so curves don't loop back on themselves
+	roundness = Math.max(-0.5, Math.min(0.5, roundness));
+
+	const result: Partial<VisEdge> = {
+		// Set color + highlight + hover all to the same value so vis-network
+		// never falls back to its default grey (#848484) on hover/select.
+		color: { color: s.color, highlight: s.color, hover: s.color, opacity: 0.85 },
 		dashes: s.dashes,
 		width,
 		arrows: arrowsFor(s.arrow),
-		// Per-type curvature so parallel edges between the same pair fan
-		// out instead of overlapping. imports=0 (straight), calls=0.2,
-		// uses-type=0.35, etc. — each type curves to a different lane.
-		smooth: { enabled: true, type: 'continuous', roundness: s.roundness },
+		// Always smooth with type 'dynamic': this routes each edge to a
+		// different point on the node circle based on the relative angle
+		// between source and target. This prevents all edges from connecting
+		// at the same spot on the node and naturally distributes connection
+		// points around the perimeter. Combined with per-type roundness and
+		// parallel-edge fan-out, edges never overlap or follow the same path.
+		smooth: { enabled: true, type: 'dynamic', roundness },
 	};
+	// Per-edge rest length: when set, overrides the global springLength.
+	if (length !== undefined) {
+		(result as VisEdge & { length?: number }).length = length;
+	}
+	return result;
 }
 
 /** Default edge opacity used by edgeStyle() — the "neutral" rest state. */
 const DEFAULT_EDGE_OPACITY = 0.85;
-/** Cap on direct neighbours considered for a single hover, for readability. */
-const HOVER_NEIGHBOR_CAP = 50;
+/** Cap on direct neighbours considered for a single hover. High enough
+ * that hubs show all their connections, since we already bail entirely
+ * above HOVER_DISABLE_THRESHOLD. */
+const HOVER_NEIGHBOR_CAP = 500;
 /** Max BFS hops for the hover attention gradient. */
 const HOVER_MAX_HOPS = 3;
+/**
+ * Node count above which all interactive "luxury" features auto-disable:
+ * hover focus, halo loop, opacity dimming animation. These features work
+ * fine on small graphs but at 3000+ nodes each hover event triggers
+ * O(N) DataSet updates and a full-canvas redraw loop — the main cause of
+ * "glitchy AF" behavior on large codebases.
+ */
+const HOVER_DISABLE_THRESHOLD = 500;
+/**
+ * Golden ratio (φ ≈ 1.618). Used for:
+ * - Cross-cluster edge rest length = springLength × φ (stretchy, lets you
+ *   pull a cluster away from the rest without dragging the whole graph).
+ * - Intra-cluster edge rest length = springLength × (1/φ) (tight, so
+ *   clusters move as cohesive units).
+ * - Mass scaling: mass = max(2, min(degree × φ, 80)) — hubs anchored with
+ *   φ-weighted mass, small nodes resist being yanked (floor of 2).
+ */
+const PHI = 1.61803398875;
 
 export class CodeGraphView extends ItemView {
 	plugin: CodeGraphPlugin;
@@ -223,8 +270,6 @@ export class CodeGraphView extends ItemView {
 		distances: Map<string, number>;
 		dir: 'in' | 'out' | null;
 	} | null = null;
-	/** Transient edge-hover focus: highlights both endpoints, dims the rest. */
-	private hoverEdgeId: string | null = null;
 	/** Last fan-in / fan-out computed by buildData (for tooltips + sizing). */
 	private cachedFanIn = new Map<string, number>();
 	private cachedFanOut = new Map<string, number>();
@@ -240,6 +285,38 @@ export class CodeGraphView extends ItemView {
 	private contextMenuEl: HTMLElement | null = null;
 	private lastModelHash = '';
 	private animTimer: number | null = null;
+	/** Separate rAF loop for edge animation (dashes/pulses). Must not be
+	 * shared with animTimer (which is used by animateEntrance and gets
+	 * clobbered, killing the edge animation loop). */
+	private edgeAnimTimer: number | null = null;
+	/** Cached derived data keyed off model.builtAt — avoids re-scanning the
+	 * full node/edge tables 4-6× per buildData() call and re-running
+	 * detectCommunities() on every debounced filter toggle. */
+	private derivedCache: {
+		builtAt: number;
+		fanIn: Map<string, number>;
+		fanOut: Map<string, number>;
+		maxLOC: number;
+		maxDeg: number;
+		maxFi: number;
+		maxFo: number;
+		communityLabels: Map<string, number>;
+		/** Undirected adjacency for hover BFS — cached so computeHopDistances
+		 * doesn't rebuild the 6000-edge map on every hover event. */
+		hoverAdjacency: Map<string, Map<string, number>>;
+	} | null = null;
+	/** True when the graph exceeded maxNodes and auto-degraded perf features. */
+	private degraded = false;
+	/** Saved converged layout positions, keyed off model structural hash.
+	 * When the model hash matches a previous render, we restore positions
+	 * instead of re-running 200 stabilization iterations from scratch. */
+	private savedLayouts = new Map<string, Map<string, { x: number; y: number }>>();
+	/** Saved camera state (zoom + pan) — restored after render() so the view
+	 * doesn't jump when toggling settings or returning to the graph. */
+	private savedCamera: { x: number; y: number; scale: number } | null = null;
+	/** True after the layout has stabilized — auras only draw when stable
+	 * so they don't chase shifting node positions during initial physics. */
+	private layoutStable = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: CodeGraphPlugin) {
 		super(leaf);
@@ -296,17 +373,39 @@ export class CodeGraphView extends ItemView {
 	}
 
 	private destroyNetwork(): void {
+		// Save camera state before destroying so render() can restore it
+		if (this.network) {
+			try {
+				const view = this.network.getViewPosition();
+				this.savedCamera = {
+					x: view.x,
+					y: view.y,
+					scale: this.network.getScale(),
+				};
+			} catch {
+				// network may already be partially destroyed
+			}
+		}
+		this.layoutStable = false;
 		if (this.opacityRAF !== null) {
 			window.cancelAnimationFrame(this.opacityRAF);
 			this.opacityRAF = null;
 		}
 		this.stopHaloLoop();
+		if (this.animTimer !== null) {
+			window.cancelAnimationFrame(this.animTimer);
+			this.animTimer = null;
+		}
+		if (this.edgeAnimTimer !== null) {
+			window.cancelAnimationFrame(this.edgeAnimTimer);
+			this.edgeAnimTimer = null;
+		}
 		if (this.hoverDebounceTimer !== null) {
 			window.clearTimeout(this.hoverDebounceTimer);
 			this.hoverDebounceTimer = null;
 		}
 		this.hoverFocus = null;
-		this.hoverEdgeId = null;
+		
 		if (this.network) {
 			this.network.destroy();
 			this.network = null;
@@ -358,16 +457,69 @@ export class CodeGraphView extends ItemView {
 	}
 
 	/**
-	 * Apply hub clustering: collapse densely-connected nodes into translucent
-	 * cluster "ghosts" so they don't obscure nodes behind them. Each hub gets
-	 * its own cluster showing a count label. Double-click a cluster to expand.
+	 * Apply clustering based on the configured strategy. Three modes, all
+	 * self-evolving from the graph (no hardcoded rules):
+	 *
+	 * - `clusterHubs` (legacy): fold high-degree hubs + their neighbors.
+	 *   Pathological for hubs with degree 200 — kept for backward compat.
+	 * - `clusterMode: 'folder'`: aggregate by top-level folder path. The
+	 *   Obsidian-native-graph / yFiles approach: compound meta-nodes.
+	 * - `clusterMode: 'community'`: aggregate by label-propagation community.
+	 *   Communities are already computed from edge density.
+	 *
+	 * Double-click a cluster to expand (already wired in the doubleClick handler).
 	 */
 	private applyClustering(): void {
 		if (!this.network) return;
 		const s = this.plugin.settings;
+		const model = this.plugin.graphModel;
+		if (!model) return;
+
+		// Legacy hub clustering — kept for backward compat, OFF by default.
+		if (s.clusterHubs) {
+			this.applyHubClustering();
+		}
+
+		// Self-evolving clustering — only above a threshold so small graphs
+		// stay full-detail.
+		const minNodesForClustering = 300;
+		const visibleNodeIds = new Set(
+			(this.nodeDS?.getIds() ?? []) as string[],
+		);
+		if (visibleNodeIds.size < minNodesForClustering) return;
+
+		if (s.clusterMode === 'folder') {
+			applyFolderClustering(
+				this.network,
+				model,
+				visibleNodeIds,
+				minNodesForClustering,
+			);
+		} else if (s.clusterMode === 'community') {
+			const labels = this.derivedCache?.communityLabels;
+			if (labels) {
+				applyCommunityClustering(
+					this.network,
+					model,
+					visibleNodeIds,
+					labels,
+					minNodesForClustering,
+				);
+			}
+		}
+	}
+
+	/**
+	 * Legacy hub clustering: fold high-degree hubs + ALL their neighbors into
+	 * a cluster. Pathological for hubs with degree 200 (swallows 201 nodes).
+	 * Kept for backward compat with the `clusterHubs` setting; new users should
+	 * use `clusterMode: 'folder'` or `'community'` instead.
+	 */
+	private applyHubClustering(): void {
+		if (!this.network) return;
+		const s = this.plugin.settings;
 		if (!s.clusterHubs) return;
 
-		// Collect hub node IDs FIRST (before clustering changes degrees)
 		const body = (
 			this.network as unknown as {
 				body: {
@@ -388,7 +540,6 @@ export class CodeGraphView extends ItemView {
 			if (degree >= s.clusterThreshold) hubIds.push(id);
 		}
 
-		// Cluster each hub with its connections using translucent styling
 		for (const id of hubIds) {
 			try {
 				this.network.clusterByConnection(id, {
@@ -673,6 +824,7 @@ export class CodeGraphView extends ItemView {
 		s.showNotes = true;
 		s.showSymbols = false;
 		s.showBadges = false;
+		s.animateEdges = true;
 		s.highlightDeadCode = true;
 		// Sizing
 		s.nodeSizingMode = 'constant';
@@ -682,12 +834,16 @@ export class CodeGraphView extends ItemView {
 		s.repelForce = 60;
 		s.linkForce = 50;
 		s.linkDistance = 110;
+		s.stretchiness = 1.618;
 		s.labelFadeZoom = 0.3;
 		s.colorMode = 'language';
 		s.zoneColorMode = 'groups';
 		s.clusterHubs = false;
 		s.clusterThreshold = 15;
+		s.clusterMode = 'none';
 		s.showZones = true;
+		s.maxNodes = 800;
+		s.edgeSmoothThreshold = 500;
 		// Focus / neighborhood
 		s.neighborhoodHops = 0;
 		s.physicsEnabled = true;
@@ -698,7 +854,7 @@ export class CodeGraphView extends ItemView {
 		this.expandedNodes.clear();
 		this.hiddenExtensions.clear();
 		this.hoverFocus = null;
-		this.hoverEdgeId = null;
+		
 		this.stopHaloLoop();
 		this.edgeSectionCollapsed = false;
 		this.nodeSectionCollapsed = false;
@@ -842,7 +998,7 @@ export class CodeGraphView extends ItemView {
 		}[] = [
 			{ key: 'centerForce', label: 'Center', min: '0', max: '100', title: 'Gravity pulling nodes toward the center' },
 			{ key: 'repelForce', label: 'Repel', min: '0', max: '100', title: 'Repulsion between nodes — higher = more spread out' },
-			{ key: 'linkForce', label: 'Link', min: '0', max: '100', title: 'Spring stiffness between connected nodes' },
+			{ key: 'linkForce', label: 'Link', min: '0', max: '100', title: 'Spring stiffness between connected nodes — higher = nodes pull their neighbors more when dragged' },
 			{ key: 'linkDistance', label: 'Distance', min: '20', max: '300', title: 'Rest length of edges — higher = more spread out' },
 		];
 		for (const { key, label, min, max, title: tip } of sliders) {
@@ -868,7 +1024,7 @@ export class CodeGraphView extends ItemView {
 							barnesHut: {
 								gravitationalConstant: -(s.repelForce / 100) * 12000,
 								centralGravity: s.centerForce / 100,
-								springConstant: (s.linkForce / 100) * 0.08,
+								springConstant: (s.linkForce / 100) * 0.5,
 								springLength: s.linkDistance,
 							},
 						},
@@ -877,6 +1033,35 @@ export class CodeGraphView extends ItemView {
 			};
 			slider.onchange = () => void this.plugin.saveSettings();
 		}
+		// Stretchiness slider — controls how much cross-cluster edges stretch
+		// vs intra-cluster edges. 1.0 = uniform (all edges same length),
+		// 1.618 = golden ratio (default), 3.0 = very stretchy (clusters pull
+		// apart easily). This lets you "pull a cluster out" by dragging.
+		const stretchRow = parent.createDiv({ cls: 'code-graph-slider-row' });
+		stretchRow.createSpan({ cls: 'code-graph-slider-label', text: 'Stretch' });
+		const stretchSlider = stretchRow.createEl('input', {
+			type: 'range',
+			cls: 'code-graph-slider',
+			attr: {
+				min: '10',
+				max: '300',
+				value: String(Math.round(s.stretchiness * 100)),
+				step: '10',
+			},
+		});
+		stretchSlider.title = 'How stretchy cross-cluster edges are. Lower = rigid (whole graph moves together). Higher = clusters pull apart easily. 162 = golden ratio.';
+		const stretchVal = stretchRow.createSpan({
+			cls: 'code-graph-slider-val',
+			text: `${Math.round(s.stretchiness * 100) / 100}`,
+		});
+		stretchSlider.oninput = () => {
+			s.stretchiness = Number(stretchSlider.value) / 100;
+			stretchVal.setText(`${Math.round(s.stretchiness * 100) / 100}`);
+		};
+		stretchSlider.onchange = () => {
+			void this.plugin.saveSettings();
+			this.render();
+		};
 		// Label fade threshold
 		const fadeRow = parent.createDiv({ cls: 'code-graph-slider-row' });
 		fadeRow.createSpan({ cls: 'code-graph-slider-label', text: 'Labels' });
@@ -939,6 +1124,34 @@ export class CodeGraphView extends ItemView {
 			if (s.clusterHubs) this.render();
 		};
 		thresholdSlider.onchange = () => void this.plugin.saveSettings();
+
+		// ── Self-evolving clustering mode (folder / community) ──
+		const modeRow = parent.createDiv({ cls: 'code-graph-mode-row' });
+		const clusterModes: {
+			id: 'none' | 'folder' | 'community';
+			label: string;
+			title: string;
+		}[] = [
+			{ id: 'none', label: 'None', title: 'No aggregation — show all nodes individually' },
+			{ id: 'folder', label: 'Folder', title: 'Aggregate nodes by top-level folder into meta-nodes. Self-evolving from folder structure.' },
+			{ id: 'community', label: 'Auto', title: 'Aggregate by auto-detected communities (label propagation from edge density). Self-evolving.' },
+		];
+		for (const cm of clusterModes) {
+			const btn = modeRow.createSpan({
+				cls: `code-graph-mode-btn${s.clusterMode === cm.id ? ' is-active' : ''}`,
+			});
+			btn.setText(cm.label);
+			btn.title = cm.title;
+			btn.onclick = () => {
+				s.clusterMode = cm.id;
+				void this.plugin.saveSettings();
+				modeRow
+					.querySelectorAll('.code-graph-mode-btn')
+					.forEach((el) => el.removeClass('is-active'));
+				btn.addClass('is-active');
+				this.render();
+			};
+		}
 	}
 
 	// --- File type filter (auto-detected) ---
@@ -1030,7 +1243,154 @@ export class CodeGraphView extends ItemView {
 				row.toggleClass('is-on', group.enabled);
 				this.updateVisible();
 			};
+
+			// ── Edit button: opens inline editor for name/query/color ──
+			const editBtn = row.createSpan({ cls: 'code-graph-group-edit-btn' });
+			setIcon(editBtn, 'pencil');
+			editBtn.title = 'Edit group';
+			editBtn.onclick = (e) => {
+				e.stopPropagation();
+				this.openGroupEditor(parent, group, row);
+			};
+
+			// ── Delete button ──
+			const delBtn = row.createSpan({ cls: 'code-graph-group-del-btn' });
+			setIcon(delBtn, 'trash-2');
+			delBtn.title = 'Delete group';
+			delBtn.onclick = (e) => {
+				e.stopPropagation();
+				s.colorGroups = s.colorGroups.filter((g) => g.id !== group.id);
+				void this.plugin.saveSettings();
+				this.renderPanel();
+				this.updateVisible();
+			};
 		}
+
+		// ── Add group button ──
+		const addRow = parent.createDiv({ cls: 'code-graph-group-add-row' });
+		const addBtn = addRow.createEl('button', {
+			cls: 'code-graph-group-add-btn',
+			text: 'Add group',
+		});
+		addBtn.onclick = () => {
+			const newGroup: ColorGroup = {
+				id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+				name: 'New group',
+				query: 'path:src/',
+				color: '#3b82f6',
+				enabled: true,
+			};
+			s.colorGroups.push(newGroup);
+			void this.plugin.saveSettings();
+			this.renderPanel();
+			this.updateVisible();
+		};
+
+		// ── Auto-seed groups button ──
+		// Discovers domains from the indexed graph via community detection +
+		// folder heuristics (same logic as the "Seed domains" command) and
+		// creates color groups for each. This is self-evolving — groups derive
+		// from the graph structure, not from hardcoded rules.
+		const seedRow = parent.createDiv({ cls: 'code-graph-group-add-row' });
+		const seedBtn = seedRow.createEl('button', {
+			cls: 'code-graph-group-add-btn',
+			text: 'Auto-seed groups',
+		});
+		seedBtn.title = 'Discover domains from the indexed graph and create color groups for each. Self-evolving from code structure.';
+		seedBtn.onclick = () => {
+			const domainCounts = discoverDomains(this.plugin);
+			if (domainCounts.size === 0) {
+				new Notice('No domains discovered — index the codebase first.');
+				return;
+			}
+			// Assign each domain a distinct color from a palette
+			const palette = ['#3b82f6', '#f59e0b', '#10b981', '#a855f7', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
+			let added = 0;
+			let idx = 0;
+			for (const [domain, count] of domainCounts) {
+				const color = palette[idx % palette.length] ?? '#64748b';
+				idx++;
+				// Skip if a group with this exact query already exists
+				const query = `domain:${domain}`;
+				const exists = s.colorGroups.some((g) => g.query === query);
+				if (exists) continue;
+				s.colorGroups.push({
+					id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+					name: `${domain} (${count})`,
+					query,
+					color,
+					enabled: true,
+				});
+				added++;
+			}
+			if (added > 0) {
+				void this.plugin.saveSettings();
+				this.renderPanel();
+				this.updateVisible();
+				new Notice(`Auto-seeded ${added} color group${added > 1 ? 's' : ''} from detected domains.`);
+			} else {
+				new Notice('All detected domains already have groups.');
+			}
+		};
+
+		// ── Help text ──
+		if (s.colorGroups.length === 0) {
+			parent.createDiv({
+				cls: 'code-graph-hint',
+				text: 'No color groups. Add one to highlight nodes by domain, path, ext, kind, status, or tag.',
+			});
+		}
+	}
+
+	/**
+	 * Inline editor for a single color group. Replaces the row with edit
+	 * fields (name, query, color picker) and Save/Cancel buttons.
+	 */
+	private openGroupEditor(
+		parent: HTMLElement,
+		group: ColorGroup,
+		row: HTMLElement,
+	): void {
+		const editor = parent.createDiv({ cls: 'code-graph-group-editor' });
+		row.replaceWith(editor);
+
+		// Name field
+		const nameRow = editor.createDiv({ cls: 'code-graph-group-edit-field' });
+		nameRow.createSpan({ text: 'Name', cls: 'code-graph-group-edit-label' });
+		const nameInput = nameRow.createEl('input', { type: 'text' });
+		nameInput.value = group.name;
+
+		// Query field
+		const queryRow = editor.createDiv({ cls: 'code-graph-group-edit-field' });
+		queryRow.createSpan({ text: 'Query', cls: 'code-graph-group-edit-label' });
+		const queryInput = queryRow.createEl('input', { type: 'text' });
+		queryInput.value = group.query;
+		queryRow.createDiv({
+			cls: 'code-graph-hint',
+			text: 'Predicates: domain:foo, path:src/, ext:ts, kind:class, status:wip, tag:api, or substring',
+		});
+
+		// Color picker
+		const colorRow = editor.createDiv({ cls: 'code-graph-group-edit-field' });
+		colorRow.createSpan({ text: 'Color', cls: 'code-graph-group-edit-label' });
+		const colorInput = colorRow.createEl('input', { type: 'color' });
+		colorInput.value = group.color;
+
+		// Save / Cancel
+		const btnRow = editor.createDiv({ cls: 'code-graph-group-edit-buttons' });
+		const saveBtn = btnRow.createEl('button', { text: 'Save', cls: 'mod-cta' });
+		saveBtn.onclick = () => {
+			group.name = nameInput.value.trim() || 'Untitled';
+			group.query = queryInput.value.trim();
+			group.color = colorInput.value;
+			void this.plugin.saveSettings();
+			this.renderPanel();
+			this.updateVisible();
+		};
+		const cancelBtn = btnRow.createEl('button', { text: 'Cancel' });
+		cancelBtn.onclick = () => {
+			this.renderPanel();
+		};
 	}
 
 	private renderSizingSection(parent: HTMLElement): void {
@@ -1245,13 +1605,95 @@ export class CodeGraphView extends ItemView {
 				void this.plugin.saveSettings();
 				if (!s.hoverFocusEnabled) {
 					this.hoverFocus = null;
-					this.hoverEdgeId = null;
+
 					this.stopHaloLoop();
 					this.applyHoverOpacity(true);
 					this.applyHoverSize();
 				}
 			},
 		});
+		this.renderNodeLegendRow(parent, {
+			label: 'Animate edges',
+			color: '#22c55e',
+			shape: 'dot',
+			size: 10,
+			isOn: s.animateEdges,
+			title:
+				'Animate dashed edges in the arrow direction and pulse solid edges. Auto-disables above 5000 edges for performance.',
+			onToggle: () => {
+				s.animateEdges = !s.animateEdges;
+				void this.plugin.saveSettings();
+				// Don't call render() — just start/stop the animation loop.
+				// render() destroys and recreates the entire network, which
+				// resets the view. Instead, toggle the edge animation timer.
+				if (s.animateEdges) {
+					this.startEdgeAnimation();
+				} else {
+					this.stopEdgeAnimation();
+				}
+			},
+		});
+
+		// ── Performance sliders ──
+		const perfRow = parent.createDiv({ cls: 'code-graph-slider-row code-graph-perf-header' });
+		perfRow.createSpan({
+			cls: 'code-graph-slider-label',
+			text: 'Scale',
+		});
+
+		// maxNodes cap
+		const maxNodesRow = parent.createDiv({ cls: 'code-graph-slider-row' });
+		maxNodesRow.createSpan({ cls: 'code-graph-slider-label', text: 'Max nodes' });
+		const maxNodesSlider = maxNodesRow.createEl('input', {
+			type: 'range',
+			cls: 'code-graph-slider',
+			attr: {
+				min: '0',
+				max: '3000',
+				value: String(s.maxNodes),
+				step: '50',
+			},
+		});
+		maxNodesSlider.title = 'Maximum visible nodes before auto-degrading performance (0 = unlimited). Top-connected nodes are kept.';
+		const maxNodesVal = maxNodesRow.createSpan({
+			cls: 'code-graph-slider-val',
+			text: s.maxNodes === 0 ? 'off' : String(s.maxNodes),
+		});
+		maxNodesSlider.oninput = () => {
+			s.maxNodes = Number(maxNodesSlider.value);
+			maxNodesVal.setText(s.maxNodes === 0 ? 'off' : String(s.maxNodes));
+		};
+		maxNodesSlider.onchange = () => {
+			void this.plugin.saveSettings();
+			this.render();
+		};
+
+		// edge smoothing threshold
+		const smoothRow = parent.createDiv({ cls: 'code-graph-slider-row' });
+		smoothRow.createSpan({ cls: 'code-graph-slider-label', text: 'Smooth' });
+		const smoothSlider = smoothRow.createEl('input', {
+			type: 'range',
+			cls: 'code-graph-slider',
+			attr: {
+				min: '0',
+				max: '2000',
+				value: String(s.edgeSmoothThreshold),
+				step: '50',
+			},
+		});
+		smoothSlider.title = 'Disable edge curve smoothing above this edge count (0 = always smooth). Biggest framerate win for large graphs.';
+		const smoothVal = smoothRow.createSpan({
+			cls: 'code-graph-slider-val',
+			text: s.edgeSmoothThreshold === 0 ? 'off' : String(s.edgeSmoothThreshold),
+		});
+		smoothSlider.oninput = () => {
+			s.edgeSmoothThreshold = Number(smoothSlider.value);
+			smoothVal.setText(s.edgeSmoothThreshold === 0 ? 'off' : String(s.edgeSmoothThreshold));
+		};
+		smoothSlider.onchange = () => {
+			void this.plugin.saveSettings();
+			this.render();
+		};
 	}
 
 	// --- Context menu + highlight ---
@@ -1329,6 +1771,11 @@ export class CodeGraphView extends ItemView {
 		if (this.hoverFocus?.nodeId === nodeId && this.hoverFocus.dir === dir) {
 			this.hoverFocus = null;
 		} else {
+			// On large graphs, skip the opacity dimming — only set the focus
+			// state so the tooltip/status reflects it. The O(N) DataSet
+			// updates in applyHoverOpacity are the bottleneck.
+			const visibleNodeCount = this.nodeDS?.length ?? 0;
+			const tooLarge = visibleNodeCount > HOVER_DISABLE_THRESHOLD;
 			const model = this.plugin.graphModel;
 			const enabled = this.plugin.settings.edgeTypesEnabled;
 			const distances = new Map<string, number>([[nodeId, 0]]);
@@ -1343,8 +1790,13 @@ export class CodeGraphView extends ItemView {
 				}
 			}
 			this.hoverFocus = { nodeId, distances, dir };
+			// Skip the expensive opacity animation + halo on large graphs.
+			if (tooLarge) {
+				
+				return;
+			}
 		}
-		this.hoverEdgeId = null;
+		
 		this.applyHoverOpacity(true);
 		this.applyHoverSize();
 		if (this.hoverFocus) this.startHaloLoop();
@@ -1356,6 +1808,12 @@ export class CodeGraphView extends ItemView {
 	/** Begin a transient (dir === null) hover focus on `nodeId`. */
 	private setHoverFocus(nodeId: string): void {
 		if (!this.plugin.settings.hoverFocusEnabled) return;
+		// Bail early when the graph is too large — computeHopDistances builds a
+		// full adjacency map from all edges (O(E)) then BFS, and the resulting
+		// applyHoverOpacity call updates O(N) DataSet items. At 3000+ nodes
+		// this freezes the UI for 100+ms on every hover.
+		const visibleNodeCount = this.nodeDS?.length ?? 0;
+		if (visibleNodeCount > HOVER_DISABLE_THRESHOLD) return;
 		const model = this.plugin.graphModel;
 		if (!model) return;
 		if (this.hoverFocus?.nodeId === nodeId && this.hoverFocus.dir === null)
@@ -1368,7 +1826,7 @@ export class CodeGraphView extends ItemView {
 			enabled,
 		);
 		this.hoverFocus = { nodeId, distances, dir: null };
-		this.hoverEdgeId = null;
+		
 		this.enhanceTooltip(nodeId);
 		this.applyHoverOpacity(true);
 		this.applyHoverSize();
@@ -1385,26 +1843,31 @@ export class CodeGraphView extends ItemView {
 	}
 
 	/** Hover an edge: spotlight both endpoints, dim the rest to 0.3. */
-	private setHoverEdge(edgeId: string): void {
-		if (!this.plugin.settings.hoverFocusEnabled) return;
-		if (this.hoverEdgeId === edgeId) return;
-		this.hoverEdgeId = edgeId;
-		this.applyHoverOpacity(true);
-	}
-
-	private clearHoverEdge(): void {
-		if (this.hoverEdgeId === null) return;
-		this.hoverEdgeId = null;
-		this.applyHoverOpacity(true);
-	}
-
-	/** Opacity for a node at a given hop distance (undefined = unconnected). */
+	/** Opacity for a node at a given hop distance (undefined = unconnected).
+	 * Smooth gradient: the focused node is full opacity, then each hop
+	 * fades by roughly half using a φ-based decay so the falloff looks
+	 * natural rather than stepping abruptly. */
 	private opacityForDistance(d: number | undefined): number {
 		if (d === undefined) return 0.05;
 		if (d <= 0) return 1.0;
+		if (d === 1) return 0.85;
+		// φ-based decay: hop 2 ≈ 0.45, hop 3 ≈ 0.22, hop 4 ≈ 0.12.
+		// Each ring of neighbors is progressively more transparent,
+		// making it easy to trace connections by eye.
+		const decay = Math.pow(1 / PHI, d) * 0.85 + 0.05;
+		return Math.max(decay, 0.05);
+	}
+
+	/** Opacity for an EDGE based on the farther endpoint's hop distance.
+	 * Direct connections (hop 0-1) are full opacity so the edge color is
+	 * vivid and clearly visible. Beyond that, edges fade with the same
+	 * φ-decay as nodes. This prevents the "edges look grey" issue where
+	 * even direct connections were being drawn at 57% opacity. */
+	private edgeOpacityForDistance(d: number | undefined): number {
+		if (d === undefined) return 0.05;
+		if (d <= 0) return 1.0;
 		if (d === 1) return 1.0;
-		if (d === 2) return 0.5;
-		return 0.1; // 3+
+		return this.opacityForDistance(d);
 	}
 
 	/** Parse an edge id (`src\u0001dst\u0001type`) back into its base color. */
@@ -1412,6 +1875,19 @@ export class CodeGraphView extends ItemView {
 		const parts = edgeId.split('\u0001');
 		const type = parts[2] as EdgeType;
 		return EDGE_STYLE[type]?.color ?? '#94a3b8';
+	}
+
+	/**
+	 * Build a full vis-network edge color object that keeps the edge's
+	 * assigned color in ALL states (base, hover, highlight). Without this,
+	 * vis-network falls back to its default grey (#848484) for hover/select
+	 * states — which is why edges "turn grey" on hover or canvas drag.
+	 */
+	private edgeColorObj(edgeId: string, opacity: number): {
+		color: string; highlight: string; hover: string; opacity: number;
+	} {
+		const c = this.edgeColorFromId(edgeId);
+		return { color: c, highlight: c, hover: c, opacity };
 	}
 
 	/**
@@ -1428,25 +1904,6 @@ export class CodeGraphView extends ItemView {
 
 		const nodeIds = this.nodeDS.getIds() as string[];
 		const edgeIds = this.edgeDS.getIds() as string[];
-
-		// Edge hover takes precedence over node hover.
-		if (this.hoverEdgeId && this.edgeDS.get(this.hoverEdgeId)) {
-			const edge = this.edgeDS.get(this.hoverEdgeId) as
-				| { from?: string; to?: string }
-				| undefined;
-			const from = edge?.from;
-			const to = edge?.to;
-			for (const id of nodeIds) {
-				nodeTargets.set(id, id === from || id === to ? 1.0 : 0.3);
-			}
-			for (const id of edgeIds) {
-				edgeTargets.set(
-					id,
-					id === this.hoverEdgeId ? 1.0 : 0.08,
-				);
-			}
-			return { nodes: nodeTargets, edges: edgeTargets };
-		}
 
 		if (!this.hoverFocus) {
 			for (const id of nodeIds) nodeTargets.set(id, 1.0);
@@ -1477,19 +1934,17 @@ export class CodeGraphView extends ItemView {
 				edgeTargets.set(id, connected ? DEFAULT_EDGE_OPACITY : 0.05);
 				continue;
 			}
-			// Undirected hover: both endpoints ≤1 → full; max is 2 → 40%; else 5%.
-			const df = distances.get(f);
-			const dt = distances.get(t);
-			const maxD = Math.max(df ?? 99, dt ?? 99);
-			if (df === undefined && dt === undefined) {
-				edgeTargets.set(id, 0.05);
-			} else if (maxD <= 1) {
-				edgeTargets.set(id, DEFAULT_EDGE_OPACITY);
-			} else if (maxD === 2) {
-				edgeTargets.set(id, 0.4);
-			} else {
-				edgeTargets.set(id, 0.05);
-			}
+		// Undirected hover: edge opacity based on the FARTHER endpoint's
+		// hop distance. Direct connections (hop 0-1) are full opacity so
+		// the edge color is vivid. Beyond that, edges fade with φ-decay.
+		const df = distances.get(f);
+		const dt = distances.get(t);
+		const maxD = Math.max(df ?? 99, dt ?? 99);
+		if (df === undefined && dt === undefined) {
+			edgeTargets.set(id, 0.05);
+		} else {
+			edgeTargets.set(id, this.edgeOpacityForDistance(maxD));
+		}
 		}
 		return { nodes: nodeTargets, edges: edgeTargets };
 	}
@@ -1502,6 +1957,11 @@ export class CodeGraphView extends ItemView {
 	 */
 	private applyHoverOpacity(animate: boolean): void {
 		if (!this.nodeDS || !this.edgeDS) return;
+		// Bail on large graphs — iterating + updating O(N) DataSet items on
+		// every hover change is the #1 cause of UI freezes at 3000+ nodes.
+		// Each nodeDS.update() call triggers vis-network's internal diff +
+		// render pipeline; at scale this is a multi-hundred-ms main-thread block.
+		if ((this.nodeDS.length ?? 0) > HOVER_DISABLE_THRESHOLD) return;
 		if (this.opacityRAF !== null) {
 			window.cancelAnimationFrame(this.opacityRAF);
 			this.opacityRAF = null;
@@ -1541,10 +2001,9 @@ export class CodeGraphView extends ItemView {
 				const prev = this.currentEdgeOpacity.get(id);
 				this.currentEdgeOpacity.set(id, val);
 				if (prev === undefined || Math.abs(val - prev) > 0.004) {
-					const color = this.edgeColorFromId(id);
 					edgeUpdates.push({
 						id,
-						color: { color, opacity: val },
+						color: this.edgeColorObj(id, val),
 					});
 				}
 			}
@@ -1556,7 +2015,7 @@ export class CodeGraphView extends ItemView {
 			return;
 		}
 
-		const duration = this.hoverFocus || this.hoverEdgeId ? 200 : 300;
+		const duration = this.hoverFocus || this.hoverFocus ? 200 : 300;
 		const start = performance.now();
 		const step = (now: number): void => {
 			const raw = Math.min((now - start) / duration, 1);
@@ -1615,6 +2074,10 @@ export class CodeGraphView extends ItemView {
 	/** Continuous redraw loop so the halo can pulse while hovering. */
 	private startHaloLoop(): void {
 		if (this.haloRAF !== null) return;
+		// The halo loop calls network.redraw() every animation frame, which
+		// triggers a full canvas repaint of ALL visible nodes + edges. At
+		// 3000+ nodes this alone drops framerate to single digits. Skip it.
+		if ((this.nodeDS?.length ?? 0) > HOVER_DISABLE_THRESHOLD) return;
 		const tick = (): void => {
 			if (!this.hoverFocus || !this.network) {
 				this.haloRAF = null;
@@ -1663,15 +2126,63 @@ export class CodeGraphView extends ItemView {
 			return;
 		}
 
+		// ── Saved layout restore: if we have a converged layout for this
+		//    model hash, pre-seed node positions so we can skip the 200-iteration
+		//    stabilization from scratch. New nodes (not in the saved layout) get
+		//    no position — vis-network will place them via physics. ──
+		const modelHash = this.computeModelHash(model);
+		const savedLayout = this.savedLayouts.get(modelHash);
+		let hasSavedLayout = false;
+		if (savedLayout && savedLayout.size > 0) {
+			hasSavedLayout = true;
+			for (const node of nodes) {
+				const pos = savedLayout.get(node.id as string);
+				if (pos) {
+					(node as VisNode & { x?: number; y?: number }).x = pos.x;
+					(node as VisNode & { x?: number; y?: number }).y = pos.y;
+				}
+			}
+		}
+
 		const nodeDS = new DataSet<VisNode, 'id'>(nodes);
 		const edgeDS = new DataSet<VisEdge, 'id'>(edges);
 		this.nodeDS = nodeDS;
 		this.edgeDS = edgeDS;
+		const options = this.buildOptions(nodes.length, edges.length);
+		// When we have a saved layout, reduce stabilization iterations
+		// dramatically — the positions are already close to converged.
+		if (hasSavedLayout) {
+			(options as Record<string, Record<string, unknown>>).physics = {
+				...((options as Record<string, Record<string, unknown>>).physics as object),
+				stabilization: { iterations: 10 },
+			};
+		}
 		this.network = new Network(
 			this.canvasEl,
 			{ nodes: nodeDS, edges: edgeDS },
-			this.buildOptions(),
+			options,
 		);
+		if (this.degraded) {
+			new Notice(
+				`Code graph: ${nodes.length} nodes · ${edges.length} edges — performance mode active (smoothing/zones/continuous-physics reduced).`,
+				6000,
+			);
+		}
+		// Stabilization progress — show a brief notice for large graphs so
+		// the user knows the layout is computing, not frozen.
+		if (nodes.length > 200) {
+			let lastPct = -1;
+			this.network.on('stabilizationProgress', (params: { iterations: number; total: number }) => {
+				const pct = Math.round((params.iterations / params.total) * 100);
+				if (pct >= lastPct + 25) {
+					lastPct = pct;
+					this.setStatus(`Stabilizing layout… ${pct}%`);
+				}
+			});
+			this.network.once('stabilizationIterationsDone', () => {
+				this.setStatus(`${nodes.length} nodes · ${edges.length} edges`);
+			});
+		}
 			this.network.on('click', (params) => {
 			const typed = params as { nodes?: string[] } | undefined;
 			const id = typed?.nodes?.[0];
@@ -1698,10 +2209,135 @@ export class CodeGraphView extends ItemView {
 				}
 			}
 		});
+
+		// ── Drag behavior: pin dragged nodes + semi-transparent edges during
+		//    canvas pan/zoom. ──
+		// When the user drags a NODE, pin it at the drop position (fixed: true).
+		// This means "I put this here" — the node stays, the graph settles
+		// around it. No snap-back, no stabilize. To unpin, drag it again or
+		// double-click empty canvas.
+		//
+		// When the user drags the CANVAS (pan), temporarily lower edge opacity
+		// so the structure stays visible (semi-transparent) without the full
+		// draw cost. Restores on dragEnd.
+		let canvasDragging = false;
+		let preDragEdgeOpacities: Map<string, number> | null = null;
+
+		this.network.on('dragStart', (params) => {
+			const typed = params as { nodes?: string[] } | undefined;
+			const nodeIds = typed?.nodes;
+			// If dragging a node → pin it (handled in dragEnd).
+			// If no nodes → it's a canvas pan → dim edges.
+			if (!nodeIds || nodeIds.length === 0) {
+				canvasDragging = true;
+				// Lower all edge opacities for the duration of the canvas drag.
+				// Uses edgeColorObj to set color+highlight+hover so vis-network
+				// doesn't fall back to grey.
+				if (this.edgeDS) {
+					preDragEdgeOpacities = new Map();
+					const updates: VisEdge[] = [];
+					for (const e of this.edgeDS.get()) {
+						const id = e.id as string;
+						const cur = (e as VisEdge & { color?: { opacity?: number } }).color;
+						const baseOp = cur?.opacity ?? DEFAULT_EDGE_OPACITY;
+						preDragEdgeOpacities.set(id, baseOp);
+						updates.push({
+							id,
+							color: this.edgeColorObj(id, baseOp * 0.15),
+						});
+					}
+					if (updates.length > 0) this.edgeDS.update(updates);
+				}
+			}
+		});
+
+		this.network.on('dragEnd', (params) => {
+			const typed = params as { nodes?: string[] } | undefined;
+			const nodeIds = typed?.nodes;
+
+			if (canvasDragging) {
+				// Canvas pan ended → restore edge opacities.
+				canvasDragging = false;
+				if (this.edgeDS && preDragEdgeOpacities) {
+					const updates: VisEdge[] = [];
+					for (const [id, op] of preDragEdgeOpacities) {
+						updates.push({ id, color: this.edgeColorObj(id, op) });
+					}
+					if (updates.length > 0) this.edgeDS.update(updates);
+				}
+				preDragEdgeOpacities = null;
+				return;
+			}
+
+			// Node drag ended → toggle pin at dropped position.
+			// If the node was NOT pinned → pin it (fixed: true). The node stays
+			// where the user put it — "I put this here."
+			// If the node WAS already pinned → unpin it (fixed: false). The
+			// node releases back to physics. This lets you drag a pinned node
+			// to unpin it, or drag a free node to pin it.
+			if (nodeIds && nodeIds.length > 0 && this.network) {
+				const body = (
+					this.network as unknown as {
+						body: { nodes: Record<string, { options: { fixed?: { x?: boolean; y?: boolean } }; setOptions: (o: unknown) => void }> };
+					}
+				).body;
+				for (const id of nodeIds) {
+					try {
+						const node = body.nodes[id];
+						if (!node) continue;
+						const wasFixed = node.options?.fixed?.x === true || node.options?.fixed?.y === true;
+						if (wasFixed) {
+							// Unpin: release back to physics
+							node.setOptions({ fixed: { x: false, y: false } });
+						} else {
+							// Pin: fix at current position
+							const pos = this.network.getPositions([id])[id];
+							if (pos) {
+								this.network.moveNode(id, pos.x, pos.y);
+								node.setOptions({ fixed: { x: true, y: true } });
+							}
+						}
+					} catch {
+						// node may have been clustered/removed
+					}
+				}
+			}
+		});
+
+		// Double-click empty canvas → unpin all nodes (release the layout).
+		// This lets the user "let go" of all pinned nodes and re-stabilize.
+		// Double-clicking a node still expands/collapses symbols.
+
 		this.network.on('doubleClick', (params) => {
 			const typed = params as { nodes?: string[] } | undefined;
 			const id = typed?.nodes?.[0];
-			if (!id) return;
+
+			// Empty canvas double-click → unpin all + re-stabilize
+			if (!id) {
+				if (this.network) {
+					const body = (
+						this.network as unknown as {
+							body: { nodes: Record<string, { setOptions: (o: unknown) => void }> };
+						}
+					).body;
+					let unpinned = 0;
+					for (const nid of Object.keys(body.nodes)) {
+						try {
+							body.nodes[nid]?.setOptions({
+								fixed: { x: false, y: false },
+							});
+							unpinned++;
+						} catch {
+							// skip
+						}
+					}
+					if (unpinned > 0) {
+						this.network.stabilize();
+						new Notice(`Unpinned ${unpinned} nodes`);
+					}
+				}
+				return;
+			}
 
 			// Cluster expansion takes priority
 			try {
@@ -1721,10 +2357,8 @@ export class CodeGraphView extends ItemView {
 			}
 			this.updateVisible();
 		});
-		// Zone heatmap: each node emits a soft colored glow. Overlapping glows
-		// accumulate (additive blending) to create a refined heatmap where dense
-		// code clusters glow brighter. Smoothed via position interpolation.
-		const heatPosCache = new Map<string, { x: number; y: number }>();
+		// Zone heatmap: each node emits a colored aura. Overlapping auras
+		// accumulate (additive blending) to show group/domain/community density.
 
 		this.network.on('beforeDrawing', (rawCtx: unknown) => {
 			const ctx = rawCtx as CanvasRenderingContext2D;
@@ -1733,14 +2367,16 @@ export class CodeGraphView extends ItemView {
 			const s = this.plugin.settings;
 			if (!s.showZones) return;
 
+			// Don't draw auras during initial stabilization — node positions
+			// are still shifting rapidly, causing the auras to appear
+			// detached from their nodes. Only draw once the layout has settled.
+			if (!this.layoutStable) return;
+
 			const drawCommunities =
 				this.cachedCommunityLabels &&
 				this.cachedCommunityLabels.size > 0;
 			const activeGroups = s.colorGroups.filter((g) => g.enabled);
 			const model = this.plugin.graphModel;
-			// Short-circuit only when the ACTIVE zoneColorMode has nothing to
-			// draw — a domain/groups/community mode with no data should not
-			// pay the per-node loop cost.
 			const domainHasAny =
 				s.zoneColorMode === 'domain' &&
 				!!model &&
@@ -1750,67 +2386,70 @@ export class CodeGraphView extends ItemView {
 			if (!domainHasAny && !groupsActive && !commActive) return;
 
 			const scale = this.network?.getScale() ?? 1;
-			// Blob radius inversely scales with zoom — bigger blobs when zoomed out
-			const blobRadius = Math.max(40, 90 / scale);
+			const blobRadius = Math.max(30, 80 / scale);
 
 			const positions = this.network?.getPositions();
 			if (!positions) return;
 
-			// Additive blending for heatmap accumulation
+			const positionIds = Object.keys(positions);
+			// Hard cap for extreme graphs — at this point auras are meaningless
+			if (positionIds.length > 3000) return;
+
+			// LOD: above 500 nodes, use cheap solid circles instead of
+			// radial gradients. Gradients are ~5× more GPU-expensive per node.
+			const useGradient = positionIds.length <= 500;
+
+			// Cache group colors per node to avoid re-evaluating
+			// matchesColorGroup every frame.
+			const zoneColorFor = (id: string): string | null => {
+				if (s.zoneColorMode === 'domain' && model) {
+					const node = model.nodes[id];
+					if (node?.domain) return domainColor(node.domain);
+				} else if (s.zoneColorMode === 'groups' && activeGroups.length > 0 && model) {
+					const node = model.nodes[id];
+					if (node) {
+						for (const g of activeGroups) {
+							if (matchesColorGroup(node, g.query)) return g.color;
+						}
+					}
+				} else if (s.zoneColorMode === 'community' && drawCommunities && this.cachedCommunityLabels) {
+					const label = this.cachedCommunityLabels.get(id);
+					if (label !== undefined) return communityColor(label);
+				}
+				return null;
+			};
+
 			ctx.save();
 			ctx.globalCompositeOperation = 'lighter';
 
-			for (const id of Object.keys(positions)) {
+			for (const id of positionIds) {
 				const pos = positions[id];
 				if (!pos) continue;
 
-				// When a contextual focus is active, fade zone auras for nodes
-				// that are ghosted (3+ hops or unconnected) so the spotlight
-				// naturally tightens.
 				if (this.hoverFocus) {
 					const d = this.hoverFocus.distances.get(id);
 					if (d === undefined || d >= 3) continue;
 				}
 
-			// Determine zone color for this node, keyed on zoneColorMode
-			// (independent of node-fill colorMode).
-			let color: string | null = null;
-			if (s.zoneColorMode === 'domain' && model) {
-				const node = model.nodes[id];
-				if (node?.domain) color = domainColor(node.domain);
-			} else if (s.zoneColorMode === 'groups' && activeGroups.length > 0 && model) {
-				const node = model.nodes[id];
-				if (node) {
-					for (const g of activeGroups) {
-						if (matchesColorGroup(node, g.query)) {
-							color = g.color;
-							break;
-						}
-					}
+				const color = zoneColorFor(id);
+				if (!color) continue;
+
+				if (useGradient) {
+					// High-detail: radial gradient (small graphs only)
+					const grad = ctx.createRadialGradient(
+						pos.x, pos.y, 0,
+						pos.x, pos.y, blobRadius,
+					);
+					grad.addColorStop(0, colorToRgba(color, 0.06));
+					grad.addColorStop(1, colorToRgba(color, 0));
+					ctx.fillStyle = grad;
+				} else {
+					// Cheap LOD: solid semi-transparent circle — no gradient
+					// allocation, 5× faster on GPU
+					ctx.fillStyle = colorToRgba(color, 0.03);
 				}
-			} else if (s.zoneColorMode === 'community' && drawCommunities && this.cachedCommunityLabels) {
-				const label = this.cachedCommunityLabels.get(id);
-				if (label !== undefined) color = communityColor(label);
-			}
-			if (!color) continue;
-
-				// Smooth position (lerp cached toward actual — prevents jitter)
-				const cached = heatPosCache.get(id);
-				const drawX = cached ? cached.x + (pos.x - cached.x) * 0.15 : pos.x;
-				const drawY = cached ? cached.y + (pos.y - cached.y) * 0.15 : pos.y;
-				heatPosCache.set(id, { x: drawX, y: drawY });
-
-				// Draw soft Gaussian-like glow
-				const grad = ctx.createRadialGradient(
-					drawX, drawY, 0,
-					drawX, drawY, blobRadius,
-				);
-				grad.addColorStop(0, colorToRgba(color, 0.07));
-				grad.addColorStop(0.4, colorToRgba(color, 0.03));
-				grad.addColorStop(1, colorToRgba(color, 0));
-				ctx.fillStyle = grad;
 				ctx.beginPath();
-				ctx.arc(drawX, drawY, blobRadius, 0, Math.PI * 2);
+				ctx.arc(pos.x, pos.y, blobRadius, 0, Math.PI * 2);
 				ctx.fill();
 			}
 
@@ -1820,6 +2459,48 @@ export class CodeGraphView extends ItemView {
 		this.network.once('stabilizationIterationsDone', () => {
 			this.network?.fit({ animation: true });
 			this.applyClustering();
+
+			// Layout is now stable — enable zone auras + edge animation
+			this.layoutStable = true;
+
+			// ── Place isolated nodes around the perimeter of the main graph.
+			//    Isolated nodes (no visible edges) have no springs holding them
+			// near the cluster — repulsion pushes them to the edges of the
+			// canvas, sometimes way out of view. After stabilization, we
+			// compute the bounding circle of the connected graph and place
+			// isolated nodes in a ring just outside it, evenly distributed
+			// using the golden angle (137.5°) for natural-looking spacing. ──
+			if (this.network && this.nodeDS) {
+				this.placeIsolatedNodes(nodes);
+			}
+
+			// ── Save the converged layout for this model hash so the next
+			//    reindex (which may produce the same structure hash) can skip
+			//    the full 200-iteration stabilization. ──
+			if (this.network) {
+				const positions = this.network.getPositions();
+				const layout = new Map<string, { x: number; y: number }>();
+				for (const id of Object.keys(positions)) {
+					const pos = positions[id];
+					if (pos) layout.set(id, { x: pos.x, y: pos.y });
+				}
+				this.savedLayouts.set(modelHash, layout);
+				// Cap the cache size — keep the 5 most recent layouts.
+				if (this.savedLayouts.size > 5) {
+					const oldest = this.savedLayouts.keys().next().value;
+					if (oldest) this.savedLayouts.delete(oldest);
+				}
+			}
+
+			// Restore camera state if we have one saved — prevents the graph
+			// from resetting zoom/pan every time a setting is toggled.
+			if (this.network && this.savedCamera) {
+				this.network.moveTo({
+					position: { x: this.savedCamera.x, y: this.savedCamera.y },
+					scale: this.savedCamera.scale,
+					animation: false,
+				});
+			}
 		});
 		// Zoom-based label fade: hide labels when zoomed out for readability
 		let labelsHidden = false;
@@ -1866,38 +2547,63 @@ export class CodeGraphView extends ItemView {
 			} catch {
 				// ignore
 			}
+			// Intent-gauging debounce: the user must REST on a node for 300ms
+			// before focus kicks in. This prevents rapid flashing as the mouse
+			// moves across the graph — the user has to actually stop and look
+			// at a node before the spotlight activates. 300ms is fast enough
+			// to feel responsive but slow enough to filter out pass-through
+			// mouse movement.
 			if (this.hoverDebounceTimer !== null)
 				window.clearTimeout(this.hoverDebounceTimer);
 			this.hoverDebounceTimer = window.setTimeout(() => {
 				this.hoverDebounceTimer = null;
 				this.setHoverFocus(id);
-			}, 80);
+			}, 300);
 		});
 		this.network.on('blurNode', () => {
 			if (this.hoverDebounceTimer !== null) {
 				window.clearTimeout(this.hoverDebounceTimer);
 				this.hoverDebounceTimer = null;
 			}
-			this.clearHoverFocus();
+			// Delay clearing too — so moving from one node to an adjacent one
+			// doesn't flash full-opacity → dark → focus again. 150ms grace
+			// period: if the user hovers a new node within 150ms, the blur
+			// is cancelled by the new hoverNode event.
+			window.setTimeout(() => {
+				// Only clear if no new hover started during the grace period
+				if (this.hoverDebounceTimer === null && !this.hoverFocus) return;
+				this.clearHoverFocus();
+			}, 150);
 		});
-		this.network.on('hoverEdge', (params) => {
-			const id = (params as { edge?: string }).edge;
-			if (id) this.setHoverEdge(id);
+		this.network.on('hoverEdge', () => {
+			// Edge hover intentionally does nothing — node hover already shows
+			// the full neighborhood with a distance gradient, which is more
+			// useful than highlighting a single edge's two endpoints.
 		});
 		this.network.on('blurEdge', () => {
-			this.clearHoverEdge();
+			// No-op — edge focus was removed.
 		});
 
 		// ── Pulsing halo around the focused node (drawn behind the node) ──
 		this.network.on('beforeDrawing', (rawCtx: unknown) => {
 			const ctx = rawCtx as CanvasRenderingContext2D;
 			if (!ctx || !this.hoverFocus || !this.network) return;
-			const positions = this.network.getPositions();
-			const pos = positions
-				? (positions as Record<string, { x: number; y: number }>)[
-						this.hoverFocus.nodeId
-					]
-				: undefined;
+			// getPositions() returns ALL visible node positions — at 3000+
+			// nodes this allocates a massive object every frame. Use the
+			// targeted single-node overload instead.
+			let pos: { x: number; y: number } | undefined;
+			try {
+				const singlePos = this.network.getPositions([
+					this.hoverFocus.nodeId,
+				]);
+				pos = singlePos
+					? (singlePos as Record<string, { x: number; y: number }>)[
+							this.hoverFocus.nodeId
+						]
+					: undefined;
+			} catch {
+				return; // node may have been removed
+			}
 			if (!pos) return;
 			const scale = this.network.getScale() || 1;
 			const baseSize =
@@ -1922,6 +2628,78 @@ export class CodeGraphView extends ItemView {
 			ctx.fill();
 			ctx.restore();
 		});
+
+		// ── Edge animation: dashed lines flow in arrow direction, solid
+		//    edges get an electric pulse. Drawn via beforeDrawing so pulses
+		//    appear BEHIND nodes. ──
+		if (this.plugin.settings.animateEdges && shouldAnimateEdges(edges.length)) {
+			// Build a lookup map for edge info (from/to/width/type/roundness)
+			const edgeInfoMap = new Map<string, EdgeAnimInfo>();
+			for (const e of edges) {
+				const parts = (e.id as string).split('\u0001');
+				const type = parts[2] as EdgeType;
+				// Extract roundness from the edge's smooth config
+				const smoothCfg = (e as VisEdge & { smooth?: { roundness?: number } }).smooth;
+				const roundness = smoothCfg?.roundness ?? EDGE_STYLE[type]?.roundness ?? 0.15;
+				edgeInfoMap.set(e.id as string, {
+					from: String(e.from ?? parts[0] ?? ''),
+					to: String(e.to ?? parts[1] ?? ''),
+					width: e.width ?? 1,
+					type,
+					roundness,
+				});
+			}
+			const edgeIds = edges.map((e) => e.id as string);
+
+			this.network.on('beforeDrawing', (rawCtx: unknown) => {
+				const ctx = rawCtx as CanvasRenderingContext2D;
+				if (!ctx || !this.network) return;
+				const positions = this.network.getPositions();
+				const scale = this.network.getScale();
+				const view = this.network.getViewPosition();
+				const net = this.network as unknown as {
+					canvas?: { canvas?: { clientWidth?: number; clientHeight?: number } };
+					body?: {
+						container?: HTMLElement;
+						edges?: Record<string, { edgeType?: { via?: { x: number; y: number } }; via?: { x: number; y: number } }>;
+					};
+				};
+				const canvasW = net.canvas?.canvas?.clientWidth ?? net.body?.container?.clientWidth ?? window.innerWidth;
+				const canvasH = net.canvas?.canvas?.clientHeight ?? net.body?.container?.clientHeight ?? window.innerHeight;
+				const halfW = canvasW / (2 * scale);
+				const halfH = canvasH / (2 * scale);
+
+				// Extract actual Bezier control points from vis-network internals.
+				// Each edge object stores its computed `via` point after geometry
+				// calc. Using these exact points ensures pulses follow the exact
+				// same curve vis-network renders — no approximation error.
+				const viaPoints = new Map<string, { x: number; y: number }>();
+				const bodyEdges = net.body?.edges;
+				if (bodyEdges) {
+					for (const edgeId of edgeIds) {
+						const edgeObj = bodyEdges[edgeId];
+						const via = edgeObj?.edgeType?.via ?? edgeObj?.via;
+						if (via) viaPoints.set(edgeId, via);
+					}
+				}
+
+				drawEdgeAnimation(ctx, positions, edgeIds, edgeInfoMap, {
+					hoverFocusId: this.hoverFocus?.nodeId ?? null,
+					hopDistances: this.hoverFocus?.distances ?? null,
+					scale,
+					viewport: {
+						left: view.x - halfW,
+						right: view.x + halfW,
+						top: view.y - halfH,
+						bottom: view.y + halfH,
+					},
+					viaPoints,
+				});
+			});
+
+			// Start the edge animation redraw loop
+			this.startEdgeAnimation();
+		}
 
 		this.setStatus(
 			`${nodes.length} nodes · ${edges.length} edges`,
@@ -2039,33 +2817,73 @@ export class CodeGraphView extends ItemView {
 		const hops = s.neighborhoodHops;
 		const query = this.searchQuery.trim().toLowerCase();
 
-		// ── Pre-compute fan-in / fan-out across ALL enabled edges ──
-		// Excludes 'contains' (structural, not a dependency) so sizing
-		// reflects real coupling, not just "has many symbols."
-		const fanIn = new Map<string, number>();
-		const fanOut = new Map<string, number>();
-		for (const e of model.edges) {
-			if (!enabled[e.type]) continue;
-			if (e.type === 'contains') continue;
-			fanIn.set(e.dst, (fanIn.get(e.dst) ?? 0) + 1);
-			fanOut.set(e.src, (fanOut.get(e.src) ?? 0) + 1);
+		// ── Derived-data cache (keyed off model.builtAt) ──
+		// Fan-in/fan-out/maxes/community labels are functions of the MODEL, not
+		// the render filters. Computing them here on every buildData() call
+		// (which fires on every debounced filter toggle) re-scans the full
+		// edge table 4-6× and re-runs detectCommunities() (O(V·E)·15).
+		// Cache them per model version so filter toggles are instant.
+		let derived = this.derivedCache;
+		if (!derived || derived.builtAt !== model.builtAt) {
+			const fanIn = new Map<string, number>();
+			const fanOut = new Map<string, number>();
+			for (const e of model.edges) {
+				if (e.type === 'contains') continue;
+				fanIn.set(e.dst, (fanIn.get(e.dst) ?? 0) + 1);
+				fanOut.set(e.src, (fanOut.get(e.src) ?? 0) + 1);
+			}
+			const nodeDegree = (id: string): number =>
+				(fanIn.get(id) ?? 0) + (fanOut.get(id) ?? 0);
+			let maxLOC = 1, maxDeg = 1, maxFi = 1, maxFo = 1;
+			for (const n of Object.values(model.nodes)) {
+				maxLOC = Math.max(maxLOC, n.lines ?? 0);
+				maxDeg = Math.max(maxDeg, nodeDegree(n.id));
+				maxFi = Math.max(maxFi, fanIn.get(n.id) ?? 0);
+				maxFo = Math.max(maxFo, fanOut.get(n.id) ?? 0);
+			}
+			// Community detection: compute ONCE per model, not per render.
+			// Run on ALL nodes (not just visible) so the labels are stable
+			// across filter toggles. This is the O(V·E)·15 hot path — moving
+			// it here from the per-toggle path is the main interactivity win.
+			const allNodeIds = Object.keys(model.nodes);
+			const communityLabels = detectCommunities(
+				model.edges,
+				allNodeIds,
+			);
+			// Hover-focus adjacency: build once per model so computeHopDistances
+			// doesn't rebuild the full edge→adjacency map on every hover.
+			// Uses ALL non-contains edges (not filtered by enabled types)
+			// because hover should show the real dependency neighborhood.
+			const hoverAdjacency = new Map<string, Map<string, number>>();
+			for (const e of model.edges) {
+				if (e.type === 'contains') continue;
+				let bucket = hoverAdjacency.get(e.src);
+				if (!bucket) { bucket = new Map(); hoverAdjacency.set(e.src, bucket); }
+				bucket.set(e.dst, Math.max(bucket.get(e.dst) ?? 0, e.weight));
+				let bucket2 = hoverAdjacency.get(e.dst);
+				if (!bucket2) { bucket2 = new Map(); hoverAdjacency.set(e.dst, bucket2); }
+				bucket2.set(e.src, Math.max(bucket2.get(e.src) ?? 0, e.weight));
+			}
+			derived = {
+				builtAt: model.builtAt,
+				fanIn,
+				fanOut,
+				maxLOC,
+				maxDeg,
+				maxFi,
+				maxFo,
+				communityLabels,
+				hoverAdjacency,
+			};
+			this.derivedCache = derived;
 		}
+
+		const { fanIn, fanOut, maxLOC, maxDeg, maxFi, maxFo } = derived;
 		this.cachedFanIn = fanIn;
 		this.cachedFanOut = fanOut;
+		this.cachedCommunityLabels = derived.communityLabels;
 		const nodeDegree = (id: string): number =>
 			(fanIn.get(id) ?? 0) + (fanOut.get(id) ?? 0);
-
-		// ── Max values for proportional sizing ──
-		let maxLOC = 1,
-			maxDeg = 1,
-			maxFi = 1,
-			maxFo = 1;
-		for (const n of Object.values(model.nodes)) {
-			maxLOC = Math.max(maxLOC, n.lines ?? 0);
-			maxDeg = Math.max(maxDeg, nodeDegree(n.id));
-			maxFi = Math.max(maxFi, fanIn.get(n.id) ?? 0);
-			maxFo = Math.max(maxFo, fanOut.get(n.id) ?? 0);
-		}
 
 		const sizeFor = (n: GraphNode): number => {
 			const min = s.nodeSizeMin;
@@ -2132,29 +2950,37 @@ export class CodeGraphView extends ItemView {
 			nodeIds.add(id);
 		}
 
-		// ── Incident set (for hideIsolated) ──
+		// ── maxNodes render cap with top-N-by-degree sampling ──
+		// When the visible set exceeds maxNodes, keep the highest-degree nodes
+		// (most connected = most important) and drop the long tail. This is the
+		// Obsidian-native-graph approach: don't render everything, render what
+		// matters. Auto-degrade zones/smoothing is handled in buildOptions.
+		const maxNodes = s.maxNodes;
+		let cappedNodeIds: Set<string> | null = null;
+		if (maxNodes > 0 && nodeIds.size > maxNodes && !visible) {
+			// Only cap when showing the whole graph (no neighborhood filter).
+			const ranked = [...nodeIds].sort(
+				(a, b) => nodeDegree(b) - nodeDegree(a),
+			);
+			cappedNodeIds = new Set(ranked.slice(0, maxNodes));
+		}
+
+		// ── Incident set (for hideIsolated + edge filtering) ──
+		const effectiveNodeIds = cappedNodeIds ?? nodeIds;
 		const incident = new Set<string>();
 		for (const e of model.edges) {
 			if (!enabled[e.type]) continue;
-			if (nodeIds.has(e.src) && nodeIds.has(e.dst)) {
+			if (effectiveNodeIds.has(e.src) && effectiveNodeIds.has(e.dst)) {
 				incident.add(e.src);
 				incident.add(e.dst);
 			}
 		}
 
-		// ── Highlight set is now driven by `hoverFocus`; opacity dimming is
-		//    applied post-render by applyHoverOpacity() so it can animate. ──
-
-		// ── Community detection — run when EITHER the node fill OR the zone
-		//    aura is community-driven, so auras work even with language fill. ──
-		let communityLabels: Map<string, number> | null = null;
-		if (s.colorMode === 'community' || s.zoneColorMode === 'community') {
-			communityLabels = detectCommunities(
-				model.edges,
-				[...nodeIds],
-			);
-		}
-		this.cachedCommunityLabels = communityLabels;
+		// ── Community labels (from cache — already computed per model) ──
+		const communityLabels =
+			s.colorMode === 'community' || s.zoneColorMode === 'community'
+				? derived.communityLabels
+				: null;
 
 		// ── Color group matching (user-defined groups override defaults) ──
 		const activeGroups = s.colorGroups.filter((g) => g.enabled);
@@ -2165,9 +2991,13 @@ export class CodeGraphView extends ItemView {
 			return null;
 		};
 
+		// (Edge smoothing is always enabled — see edgeStyle() for details)
+		// (disableSmooth removed — edges are always smooth with type 'dynamic'
+		// so connection points distribute around the node perimeter naturally)
+
 		// ── Build vis nodes ──
 		const nodes: VisNode[] = [];
-		for (const id of nodeIds) {
+		for (const id of effectiveNodeIds) {
 			if (this.hideIsolated && !incident.has(id)) continue;
 			const n = model.nodes[id];
 			if (!n) continue;
@@ -2195,27 +3025,93 @@ export class CodeGraphView extends ItemView {
 			const styledNode = { ...n };
 			if (groupColor) (styledNode as unknown as { _overrideColor?: string })._overrideColor = groupColor;
 
+			// ── Node mass proportional to degree, φ-weighted ──
+			// vis-network's barnesHut physics models edges as springs. When
+			// you drag a node, the spring force pulls connected nodes. But if
+			// all nodes have the same default mass (1), hubs with 200 edges
+			// barely pull their neighbors. Setting mass ∝ degree × φ means:
+			// - Hubs are "heavy" (mass up to 80) — they anchor clusters and
+			//   pull their neighbors along when dragged.
+			// - Small nodes have a floor mass of 2 — they resist being yanked
+			//   by every little drag, so the graph doesn't wobble forever.
+			// - φ scaling gives a natural progression: degree 1 → 2, degree 5
+			//   → 8, degree 10 → 16, degree 50 → 50 (capped at 80).
+			const deg = nodeDegree(id);
+			const mass = Math.max(2, Math.min(Math.round(deg * PHI), 80));
+
 			const visNode: VisNode = {
 				id,
 				label,
 				title,
+				mass,
 				...nodeStyle(styledNode, sz, isDead, s.colorMode, communityLabels, activeGroups.length > 0 ? activeGroups : null),
 			};
 			nodes.push(visNode);
 		}
 
 		// ── Build vis edges ──
+		// Per-edge rest length: intra-folder edges are tight (÷ stretchiness),
+		// cross-folder edges are stretchy (× stretchiness). This lets you pull
+		// a cluster away from the graph — cross-cluster edges stretch like
+		// rubber bands instead of dragging the whole graph. Intra-cluster
+		// edges stay short, so the cluster moves as a cohesive unit.
+		// The stretchiness factor is user-controllable: 1.0 = uniform (all
+		// edges same length), 1.618 = golden ratio (default), 3.0 = very
+		// stretchy (clusters pull apart easily).
+		const baseLen = s.linkDistance;
+		const stretch = s.stretchiness;
+		const intraLen = Math.round(baseLen / stretch);
+		const crossLen = Math.round(baseLen * stretch);
+		// Pre-compute folder keys for visible nodes (avoids re-splitting path
+		// strings for every edge).
+		const folderOf = new Map<string, string>();
+		for (const id of effectiveNodeIds) {
+			const n = model.nodes[id];
+			if (n) folderOf.set(id, folderKey(n));
+		}
+
+		// ── Build vis edges ──
+		// Detect parallel edges (same src→dst pair, different types) so we can
+		// assign fan-out roundness offsets. Without this, multiple edges between
+		// the same pair would overlap. Each parallel edge gets an additional
+		// roundness offset so they curve to different "lanes" — like cables
+		// on a suspension bridge fanning out from the same anchor point.
+		const parallelCount = new Map<string, number>();
 		const edges: VisEdge[] = [];
 		for (const e of model.edges) {
 			if (!enabled[e.type]) continue;
 			if (visible && (!visible.has(e.src) || !visible.has(e.dst)))
 				continue;
-			if (!nodeIds.has(e.src) || !nodeIds.has(e.dst)) continue;
+			if (!effectiveNodeIds.has(e.src) || !effectiveNodeIds.has(e.dst))
+				continue;
+
+			// Track how many edges connect this same pair (either direction)
+			const pairKey = e.src < e.dst ? `${e.src}\u0001${e.dst}` : `${e.dst}\u0001${e.src}`;
+			const count = parallelCount.get(pairKey) ?? 0;
+			parallelCount.set(pairKey, count + 1);
+
+			// Determine edge length: same folder → tight, different folder → stretchy
+			const srcFolder = folderOf.get(e.src);
+			const dstFolder = folderOf.get(e.dst);
+			const sameCluster = srcFolder !== undefined && srcFolder === dstFolder;
+			const edgeLen = sameCluster ? intraLen : crossLen;
+
+			// Fan-out: for parallel edges, add an offset so each curves to a
+			// different lane. The first edge uses the type's base roundness.
+			// Each additional edge gets ±0.15 extra curvature, alternating
+			// direction (clockwise / counter-clockwise) so they fan symmetrically.
+			let roundnessOverride: number | undefined;
+			if (count > 0) {
+				const direction = count % 2 === 1 ? 1 : -1;
+				const magnitude = Math.ceil(count / 2) * 0.15;
+				roundnessOverride = EDGE_STYLE[e.type].roundness + direction * magnitude;
+			}
+
 			const visEdge: VisEdge = {
 				id: `${e.src}\u0001${e.dst}\u0001${e.type}`,
 				from: e.src,
 				to: e.dst,
-				...edgeStyle(e.type, e.weight),
+				...edgeStyle(e.type, e.weight, roundnessOverride, edgeLen),
 			};
 			edges.push(visEdge);
 		}
@@ -2236,24 +3132,11 @@ export class CodeGraphView extends ItemView {
 		maxHops: number,
 		enabled: Record<EdgeType, boolean>,
 	): Map<string, number> {
-		// Build a weighted undirected adjacency (weight = max over edge types).
-		const neighbors = new Map<string, Map<string, number>>();
-		for (const e of model.edges) {
-			if (!enabled[e.type]) continue;
-			if (e.type === 'contains') continue;
-			let bucket = neighbors.get(e.src);
-			if (!bucket) {
-				bucket = new Map();
-				neighbors.set(e.src, bucket);
-			}
-			bucket.set(e.dst, Math.max(bucket.get(e.dst) ?? 0, e.weight));
-			let bucket2 = neighbors.get(e.dst);
-			if (!bucket2) {
-				bucket2 = new Map();
-				neighbors.set(e.dst, bucket2);
-			}
-			bucket2.set(e.src, Math.max(bucket2.get(e.src) ?? 0, e.weight));
-		}
+		// Use cached adjacency if available (built once per model version).
+		// Previously this rebuilt the full adjacency from ALL edges on every
+		// single hover event — at 6000 edges that's 12000 Map operations
+		// synchronously on the main thread, causing 50-100ms freezes.
+		const neighbors = this.derivedCache?.hoverAdjacency ?? new Map<string, Map<string, number>>();
 
 		const distances = new Map<string, number>([[start, 0]]);
 		let frontier = [start];
@@ -2326,33 +3209,212 @@ export class CodeGraphView extends ItemView {
 		return seen;
 	}
 
-	private buildOptions(): Options {
+	/**
+	 * Place isolated nodes (degree 0 in the visible graph) in a ring around
+	 * the perimeter of the main connected graph. Uses the golden angle
+	 * (137.5° = 360°/φ²) for natural, non-clumping distribution. If there are
+	 * few isolated nodes, they cluster together on one side of the ring; if
+	 * many, they spread evenly around the full perimeter.
+	 *
+	 * This prevents isolated nodes from drifting to the edges of the canvas
+	 * or way out into "outer space" — they stay near the graph, just outside
+	 * the main cluster, in a predictable ring.
+	 */
+	private placeIsolatedNodes(allNodes: VisNode[]): void {
+		if (!this.network) return;
 		const s = this.plugin.settings;
-		return {
+		const enabled = s.edgeTypesEnabled;
+
+		// Find which node IDs are isolated (no enabled edges connect them)
+		const model = this.plugin.graphModel;
+		if (!model) return;
+		const connectedIds = new Set<string>();
+		for (const e of model.edges) {
+			if (!enabled[e.type]) continue;
+			connectedIds.add(e.src);
+			connectedIds.add(e.dst);
+		}
+		const isolatedIds = allNodes
+			.map((n) => n.id as string)
+			.filter((id) => !connectedIds.has(id));
+		if (isolatedIds.length === 0) return;
+
+		// Compute bounding circle of the connected graph
+		const positions = this.network.getPositions();
+		let cx = 0, cy = 0, connectedCount = 0;
+		let maxR = 0;
+		for (const id of Object.keys(positions)) {
+			if (!connectedIds.has(id)) continue;
+			const pos = positions[id];
+			if (!pos) continue;
+			cx += pos.x;
+			cy += pos.y;
+			connectedCount++;
+		}
+		if (connectedCount === 0) return;
+		cx /= connectedCount;
+		cy /= connectedCount;
+		for (const id of Object.keys(positions)) {
+			if (!connectedIds.has(id)) continue;
+			const pos = positions[id];
+			if (!pos) continue;
+			const r = Math.hypot(pos.x - cx, pos.y - cy);
+			if (r > maxR) maxR = r;
+		}
+
+		// Place isolated nodes in a ring just outside the main graph's
+		// bounding circle. The ring radius is derived purely from the graph's
+		// actual extent (maxR) — scaled by φ so it's proportional to the graph
+		// size, not a hardcoded pixel offset. A tiny graph gets a tight ring;
+		// a 3000-node graph gets a proportionally larger ring.
+		const ringRadius = maxR * PHI;
+		const goldenAngle = 2 * Math.PI / (PHI * PHI); // ≈ 137.5°
+		const startOffset = Math.random() * Math.PI * 2; // random rotation
+		const body = (
+			this.network as unknown as {
+				body: { nodes: Record<string, { setOptions: (o: unknown) => void }> };
+			}
+		).body;
+		for (let i = 0; i < isolatedIds.length; i++) {
+			const id = isolatedIds[i]!;
+			const angle = startOffset + i * goldenAngle;
+			const x = cx + Math.cos(angle) * ringRadius;
+			const y = cy + Math.sin(angle) * ringRadius;
+			try {
+				this.network.moveNode(id, x, y);
+				// Pin isolated nodes so physics doesn't push them off-screen.
+				// The user can still drag them (drag toggles the pin).
+				body.nodes[id]?.setOptions({ fixed: { x: true, y: true } });
+			} catch {
+				// node may have been clustered/removed
+			}
+		}
+	}
+
+	/** Start the edge animation redraw loop without rebuilding the graph. */
+	private startEdgeAnimation(): void {
+		if (this.edgeAnimTimer !== null) return;
+		if (!this.network) return;
+		const tick = (): void => {
+			if (!this.network) {
+				this.edgeAnimTimer = null;
+				return;
+			}
+			this.network.redraw();
+			this.edgeAnimTimer = window.requestAnimationFrame(tick);
+		};
+		this.edgeAnimTimer = window.requestAnimationFrame(tick);
+	}
+
+	/** Stop the edge animation redraw loop. */
+	private stopEdgeAnimation(): void {
+		if (this.edgeAnimTimer !== null) {
+			window.cancelAnimationFrame(this.edgeAnimTimer);
+			this.edgeAnimTimer = null;
+		}
+		// Redraw once more to clear the animation overlay
+		this.network?.redraw();
+	}
+
+	private buildOptions(nodeCount: number, edgeCount: number): Options {
+		const s = this.plugin.settings;
+		// ── Auto-degrade: when node/edge count exceeds thresholds, disable
+		//    expensive features automatically. Small graphs stay full-quality. ──
+		const maxNodes = s.maxNodes;
+		const smoothThreshold = s.edgeSmoothThreshold;
+		const overNodeCap =
+			maxNodes > 0 && nodeCount > maxNodes;
+		const overEdgeCap =
+			smoothThreshold > 0 && edgeCount > smoothThreshold;
+		this.degraded = overNodeCap || overEdgeCap;
+		// Hover detection is vis-network's most expensive interaction feature:
+		// it hit-tests every visible node on every mousemove. Above the
+		// threshold, disable it so mouse movement doesn't trigger per-frame
+		// canvas work. The user can still click nodes — they just lose hover
+		// dimming/spotlight (which is unreadable at this scale anyway).
+		const hoverTooExpensive = nodeCount > HOVER_DISABLE_THRESHOLD;
+
+		const options: Options = {
 			nodes: { shape: 'dot', font: { size: 13 } },
-		edges: {
-			// Per-edge smooth is set in edgeStyle(); global default is neutral
-			smooth: { enabled: false },
-			color: { inherit: false },
-		},
+			edges: {
+				// Per-edge smooth is set in edgeStyle(); global default is neutral
+				smooth: { enabled: false },
+				// Set all color sub-properties so vis-network never falls back
+				// to its default grey (#848484) during any render state.
+				color: {
+					color: '#64748b',
+					highlight: '#64748b',
+					hover: '#64748b',
+					inherit: false,
+					opacity: 0.85,
+				},
+				// Disable vis-network's built-in hover/select edge styling.
+				// Without this, hovering causes vis-network to override our
+				// edge colors with its default grey (#848484). Our
+				// applyHoverOpacity system is the sole controller of edge
+				// appearance.
+				chosen: { edge: false, label: false },
+			},
 			physics: {
 				enabled: s.physicsEnabled,
 				stabilization: { iterations: 200 },
 				barnesHut: {
 					gravitationalConstant: -(s.repelForce / 100) * 12000,
 					centralGravity: s.centerForce / 100,
-					springConstant: (s.linkForce / 100) * 0.08,
+					// Spring constant: how strongly edges pull connected nodes.
+					// Per-edge `length` (set in buildData) makes cross-cluster
+					// edges stretchy (× stretchiness) and intra-cluster edges
+					// tight (÷ stretchiness), so you can pull clusters apart.
+					springConstant: (s.linkForce / 100) * 0.5,
 					springLength: s.linkDistance,
-					damping: 0.4,
+					// Damping 0.55: high enough that oscillations die quickly
+					// after drag/stabilization. Combined with minVelocity below,
+					// the graph settles instead of jittering forever.
+					damping: 0.55,
 				},
+				// minVelocity: below this, physics treats velocity as zero and
+				// stops the simulation. This is the key settling parameter.
+				// Higher value = settles faster (but may stop before perfect
+				// convergence). 5.0 is a good balance — the graph looks settled
+				// visually but doesn't waste CPU on micro-oscillations.
+				minVelocity: 5.0,
+				// maxVelocity: cap so nodes don't fly off-screen during drag.
+				maxVelocity: 30,
+				// adaptiveTimestep: vis-network adjusts the integration step
+				// for stability. Helps prevent the "explosive" behavior when
+				// you release a dragged node.
+				adaptiveTimestep: true,
+				timestep: 0.35,
 			},
 			interaction: {
-				hover: true,
+				hover: !hoverTooExpensive,
 				tooltipDelay: 120,
 				navigationButtons: false,
 				keyboard: false,
 			},
 		} as Options;
+
+		// ── Perf escape hatches ──
+		// Don't use hideEdgesOnDrag — it makes edges vanish completely during
+		// canvas pan/zoom, which is jarring. Instead we hook dragStart/dragEnd
+		// to temporarily lower edge opacity (semi-transparent) during canvas
+		// drag. This keeps the graph structure visible while still reducing
+		// the per-frame draw cost. See the dragStart/dragEnd handlers in render().
+		(options as Record<string, Record<string, unknown>>).interaction = {
+			...((options as Record<string, Record<string, unknown>>).interaction as object),
+			hideEdgesOnDrag: false,
+			hideNodesOnDrag: overNodeCap || nodeCount > HOVER_DISABLE_THRESHOLD,
+		};
+
+		// improvedLayout defaults to true but is O(N²) — disable on large graphs
+		if (overNodeCap) {
+			(options as Record<string, Record<string, unknown>>).layout = {
+				improvedLayout: false,
+				randomSeed: 42,
+			};
+		}
+
+		return options;
 	}
 
 	private async openFile(id: string): Promise<void> {

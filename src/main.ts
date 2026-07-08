@@ -293,6 +293,26 @@ export default class CodeGraphPlugin extends Plugin {
 			this.settings.excludeFolders = DEFAULT_SETTINGS.excludeFolders;
 			this.settings.codeExtensions = DEFAULT_SETTINGS.codeExtensions;
 			this.settings.edgeTypesEnabled = { ...DEFAULT_SETTINGS.edgeTypesEnabled };
+			// v9 migration: clear calculator-specific colorGroups that were
+			// shipped as defaults in v8. Users who defined their own groups
+			// (different from the old 4 calculator entries) keep them.
+			if (saved && (saved.settingsVersion ?? 0) < 9) {
+				const oldCalcDefaults = (
+					saved.colorGroups ?? []
+				).filter(
+					(g: { query: string }) =>
+						g.query === 'domain:calculator' ||
+						g.query === 'path:components/' ||
+						g.query === 'path:hooks/' ||
+						g.query === 'path:adapters/',
+				);
+				if (
+					oldCalcDefaults.length > 0 &&
+					(saved.colorGroups?.length ?? 0) === oldCalcDefaults.length
+				) {
+					this.settings.colorGroups = [];
+				}
+			}
 			await this.saveSettings();
 		}
 	}

@@ -125,6 +125,25 @@ function kindNoun(node: GraphNode): string {
 	}
 }
 
+/**
+ * Discover domains from the indexed graph and return a map of
+ * domain name → file count. This is the read-only discovery phase of
+ * seedDomains — it doesn't write anything. Used by the graph view's
+ * "Auto-seed groups" button to create color groups from detected domains.
+ */
+export function discoverDomains(
+	plugin: CodeGraphPlugin,
+): Map<string, number> {
+	const model = plugin.graphModel;
+	if (!model || Object.keys(model.nodes).length === 0) return new Map();
+	const assignments = discover(plugin, model);
+	const counts = new Map<string, number>();
+	for (const a of assignments.values()) {
+		counts.set(a.domain, (counts.get(a.domain) ?? 0) + 1);
+	}
+	return counts;
+}
+
 /** Build the per-file assignment map from the graph model + community detection. */
 function discover(
 	plugin: CodeGraphPlugin,

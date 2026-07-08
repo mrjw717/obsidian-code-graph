@@ -63,7 +63,7 @@ available in the app when your plugin is enabled.
 	top: 12px;
 	left: 12px;
 	z-index: 5;
-	width: 248px;
+	width: 320px;
 	max-height: calc(100% - 24px);
 	overflow-y: auto;
 	background: var(--background-secondary);
@@ -526,4 +526,93 @@ available in the app when your plugin is enabled.
 	display: flex;
 	gap: 8px;
 	justify-content: flex-end;
+}
+
+/* ===== Color group editor ===== */
+
+.code-graph-group-edit-btn,
+.code-graph-group-del-btn {
+	cursor: pointer;
+	opacity: 0.4;
+	flex-shrink: 0;
+	display: inline-flex;
+	align-items: center;
+	padding: 2px;
+	border-radius: 4px;
+}
+
+.code-graph-group-edit-btn:hover,
+.code-graph-group-del-btn:hover {
+	opacity: 1;
+	background: var(--background-modifier-hover);
+}
+
+.code-graph-group-del-btn {
+	color: var(--text-error);
+}
+
+.code-graph-group-add-row {
+	margin-top: 4px;
+}
+
+.code-graph-group-add-btn {
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	padding: 4px 8px;
+	cursor: pointer;
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: 6px;
+	background: transparent;
+	width: 100%;
+}
+
+.code-graph-group-add-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.code-graph-group-editor {
+	padding: 8px;
+	border-radius: 6px;
+	background: var(--background-secondary);
+	margin: 2px 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.code-graph-group-edit-field {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.code-graph-group-edit-label {
+	font-size: var(--font-smallest-size);
+	color: var(--text-muted);
+}
+
+.code-graph-group-edit-field input[type='text'] {
+	flex: 1;
+}
+
+.code-graph-group-edit-field input[type='color'] {
+	width: 40px;
+	height: 28px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	cursor: pointer;
+}
+
+.code-graph-group-edit-buttons {
+	display: flex;
+	gap: 6px;
+	justify-content: flex-end;
+	margin-top: 2px;
+}
+
+.code-graph-group-edit-buttons button {
+	font-size: var(--font-ui-small);
+	padding: 3px 10px;
+	border-radius: 4px;
 }

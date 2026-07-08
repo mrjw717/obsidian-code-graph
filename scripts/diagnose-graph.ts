@@ -1,13 +1,19 @@
 /**
  * Standalone diagnostic — runs the plugin's ACTUAL extraction pipeline
- * (profiles + tree-sitter + resolver + tsconfig) against the calculator vault
+ * (profiles + tree-sitter + resolver + tsconfig) against a vault's code
  * files, without needing Obsidian.
  *
  * Prints: per-type counts, per-language counts, parse failures, sample edges,
  * and specifically validates that JSX component references (e.g. <Calculator/>)
  * now produce `calls` edges.
  *
- * Run: npx jiti scripts/diagnose-graph.ts
+ * Paths are configurable via env vars or argv so this is not hardwired to a
+ * specific machine. Fallbacks keep the script working for the original dev.
+ *
+ * Usage:
+ *   npx jiti scripts/diagnose-graph.ts [--vault <path>] [--scan <path>] [--scan <path> ...]
+ *   # or via env:
+ *   CG_VAULT_ROOT=/path/to/vault CG_SCAN_ROOTS=/path/a,/path/b npx jiti scripts/diagnose-graph.ts
  */
 import fs from 'fs';
 import path from 'path';
@@ -25,11 +31,35 @@ import { findTsConfig } from '../src/indexer/tsconfig';
 import type { ImportSpec, SymbolExtract } from '../src/indexer/extractor';
 import { EdgeAccumulator, makeSymbolNode, symbolNodeId } from '../src/graph/model';
 
-const VAULT_ROOT = '/home/josh/Obsidian-Plugin-Dev-Vault/Plugin-Testing';
+// ── Configurable paths (env > argv > fallback) ─────────────────────────────
+function parseArgs(): { vaultRoot: string; scanRoots: string[] } {
+	const argv = process.argv.slice(2);
+	let vaultRoot = process.env.CG_VAULT_ROOT ?? '';
+	const scanRoots: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] === '--vault' && argv[i + 1]) {
+			vaultRoot = argv[++i]!;
+		} else if (argv[i] === '--scan' && argv[i + 1]) {
+			scanRoots.push(argv[++i]!);
+		}
+	}
+	if (scanRoots.length === 0 && process.env.CG_SCAN_ROOTS) {
+		scanRoots.push(
+			...process.env.CG_SCAN_ROOTS.split(',').map((s) => s.trim()).filter(Boolean),
+		);
+	}
+	// Fallbacks — original dev paths so the script works out-of-the-box there.
+	if (!vaultRoot) {
+		vaultRoot = '/home/josh/Obsidian-Plugin-Dev-Vault/Plugin-Testing';
+	}
+	if (scanRoots.length === 0) {
+		scanRoots.push(path.join(vaultRoot, 'calculator'));
+	}
+	return { vaultRoot, scanRoots };
+}
+
+const { vaultRoot: VAULT_ROOT, scanRoots: SCAN_ROOTS } = parseArgs();
 const PLUGIN_DIR = path.join(VAULT_ROOT, '.obsidian/plugins/code-graph');
-const SCAN_ROOTS = [
-	path.join(VAULT_ROOT, 'calculator'),
-];
 const EXCLUDE_DIRS = new Set(['node_modules', '.next', '.git', '.turbo', 'dist', 'build']);
 const CANDIDATE_EXTS = ['ts', 'tsx', 'js', 'jsx', 'py', 'css', 'c', 'h', 'cpp', 'cc', 'go', 'rs', 'java', 'lua', 'php'];
 
@@ -271,15 +301,20 @@ async function main(): Promise<void> {
 		if (unresolvedSpecs.length > 20) console.log(`  ... and ${unresolvedSpecs.length - 20} more`);
 	}
 
-	// 10. Symbols extracted from a key file (sanity check extraction depth).
-	const calculatorFile = perFile.find((f) => f.rel.endsWith('organisms/Calculator.tsx'));
-	if (calculatorFile) {
-		console.log(`\n=== EXTRACTION DEPTH: Calculator.tsx ===`);
-		console.log(`Imports: ${calculatorFile.imports.length}`);
-		console.log(`Defines: ${calculatorFile.symbols.defines.length} (${calculatorFile.symbols.defines.map(d => d.name).join(', ')})`);
-		console.log(`References (calls): ${calculatorFile.symbols.references.length}`);
-		console.log(`  Sample ref names: ${calculatorFile.symbols.references.slice(0, 15).map(r => r.name).join(', ')}`);
-		console.log(`Inherits: ${calculatorFile.symbols.inherits.length}`);
+	// 10. Symbols extracted from the most-referenced file (sanity check depth).
+	const mostRefFile = perFile
+		.map((f) => ({
+			f,
+			refCount: f.symbols.references.length,
+		}))
+		.sort((a, b) => b.refCount - a.refCount)[0]?.f;
+	if (mostRefFile && mostRefFile.symbols.references.length > 0) {
+		console.log(`\n=== EXTRACTION DEPTH: ${mostRefFile.rel} ===`);
+		console.log(`Imports: ${mostRefFile.imports.length}`);
+		console.log(`Defines: ${mostRefFile.symbols.defines.length} (${mostRefFile.symbols.defines.map(d => d.name).join(', ')})`);
+		console.log(`References (calls): ${mostRefFile.symbols.references.length}`);
+		console.log(`  Sample ref names: ${mostRefFile.symbols.references.slice(0, 15).map(r => r.name).join(', ')}`);
+		console.log(`Inherits: ${mostRefFile.symbols.inherits.length}`);
 	}
 }
 

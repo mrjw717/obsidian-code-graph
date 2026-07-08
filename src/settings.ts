@@ -22,6 +22,11 @@ export interface ColorGroup {
 export interface CodeGraphSettings {
 	/** Bumped when defaults change so persisted settings can be migrated. */
 	settingsVersion: number;
+	// ── Scaling / performance ──
+	/** Max visible nodes before auto-degrade (zones/smoothing/continuous-physics off). 0 = unlimited. */
+	maxNodes: number;
+	/** Auto-disable edge smoothing above this edge count. 0 = never smooth. */
+	edgeSmoothThreshold: number;
 	/** File extensions (without dot) to treat as code. */
 	codeExtensions: string[];
 	/** Which edge types to extract / show. */
@@ -51,11 +56,16 @@ export interface CodeGraphSettings {
 	// ── Display toggles ──
 	highlightDeadCode: boolean;
 	showBadges: boolean;
+	/** Animate edges: dashed lines flow in arrow direction, solid lines get
+	 * an electric pulse. Auto-disables above HOVER_DISABLE_THRESHOLD for perf. */
+	animateEdges: boolean;
 	// ── Physics forces (mirror Obsidian core graph controls) ──
 	centerForce: number; // 0-100
 	repelForce: number; // 0-100
 	linkForce: number; // 0-100
 	linkDistance: number; // 10-300
+	/** Cross-cluster edge stretch multiplier (1.0 = uniform, 1.618 = φ, 3.0 = very stretchy). */
+	stretchiness: number;
 	// ── Zoom-based label visibility ──
 	labelFadeZoom: number; // 0.0-2.0 — hide labels below this zoom
 	// ── Coloring mode ──
@@ -63,6 +73,8 @@ export interface CodeGraphSettings {
 	// ── Hub clustering ──
 	clusterHubs: boolean;
 	clusterThreshold: number; // cluster nodes with degree above this
+	/** Clustering strategy for large graphs: 'none' | 'folder' | 'community'. */
+	clusterMode: 'none' | 'folder' | 'community';
 	// ── Color groups (user-defined, Obsidian-like) ──
 	colorGroups: ColorGroup[];
 	// ── Zone rendering ──
@@ -75,10 +87,12 @@ export interface CodeGraphSettings {
 	zoneColorMode: 'groups' | 'community' | 'domain';
 }
 
-export const CURRENT_SETTINGS_VERSION = 8;
+export const CURRENT_SETTINGS_VERSION = 9;
 
 export const DEFAULT_SETTINGS: CodeGraphSettings = {
 	settingsVersion: CURRENT_SETTINGS_VERSION,
+	maxNodes: 800,
+	edgeSmoothThreshold: 500,
 	codeExtensions: [
 		'ts',
 		'tsx',
@@ -154,20 +168,18 @@ export const DEFAULT_SETTINGS: CodeGraphSettings = {
 	nodeSizeMax: 25,
 	highlightDeadCode: true,
 	showBadges: false,
+	animateEdges: true,
 	centerForce: 30,
 	repelForce: 60,
 	linkForce: 50,
 	linkDistance: 110,
+	stretchiness: 1.618,
 	labelFadeZoom: 0.3,
 	colorMode: 'language',
 	clusterHubs: false,
 	clusterThreshold: 15,
-	colorGroups: [
-		{ id: 'g1', name: 'Core engine', query: 'domain:calculator', color: '#3b82f6', enabled: true },
-		{ id: 'g2', name: 'UI components', query: 'path:components/', color: '#f59e0b', enabled: true },
-		{ id: 'g3', name: 'Hooks', query: 'path:hooks/', color: '#10b981', enabled: true },
-		{ id: 'g4', name: 'Ports/Adapters', query: 'path:adapters/', color: '#a855f7', enabled: true },
-	],
+	clusterMode: 'none',
+	colorGroups: [],
 	showZones: true,
 	hoverFocusEnabled: true,
 	zoneColorMode: 'groups',
