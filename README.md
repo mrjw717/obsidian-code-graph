@@ -13,7 +13,7 @@
 
 ---
 
-<img src="screenshot.png" alt="Code Graph — interactive code dependency graph inside Obsidian" width="100%">
+<img src="https://github.com/mrjw717/obsidian-code-graph/raw/main/screenshot.png" alt="Code Graph — interactive code dependency graph inside Obsidian" width="100%">
 
 ---
 

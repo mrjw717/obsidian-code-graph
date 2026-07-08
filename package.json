@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-code-graph",
-	"version": "1.0.5",
+	"version": "1.0.6",
 	"description": "Code Graph — visualize code relationships as an interactive graph inside Obsidian.",
 	"main": "main.js",
 	"type": "module",
