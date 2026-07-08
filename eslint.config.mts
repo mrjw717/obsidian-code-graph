@@ -14,6 +14,7 @@ export default defineConfig(
 		'package-lock.json',
 		'tsconfig.json',
 		'src/indexer/wasm-embedded.ts',
+		'src/indexer/wasm-embedded.d.ts',
 		'scripts/diagnose-graph.ts',
 		'scripts/test-edge-types.ts',
 		'scripts/embed-wasm.mjs',

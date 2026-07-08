@@ -48,4 +48,5 @@ jobs:
 
                   gh release create "$tag" \
                     --title="$tag" \
+                    --notes-file=".github/release-notes.md" \
                     main.js manifest.json ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
