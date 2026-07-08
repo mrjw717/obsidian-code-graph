@@ -13,6 +13,10 @@ export default defineConfig(
 		'package.json',
 		'package-lock.json',
 		'tsconfig.json',
+		'src/indexer/wasm-embedded.ts',
+		'scripts/diagnose-graph.ts',
+		'scripts/test-edge-types.ts',
+		'scripts/embed-wasm.mjs',
 	]),
 	{
 		languageOptions: {
@@ -21,7 +25,11 @@ export default defineConfig(
 			},
 			parserOptions: {
 				projectService: {
-					allowDefaultProject: ['eslint.config.mts', 'manifest.json'],
+					allowDefaultProject: [
+					'eslint.config.mts',
+					'manifest.json',
+					'vitest.config.ts',
+				],
 				},
 				tsconfigRootDir: import.meta.dirname,
 				extraFileExtensions: ['.json'],

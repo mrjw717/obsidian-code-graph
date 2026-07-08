@@ -1,11 +1,11 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
+	"id": "code-graph",
+	"name": "Code Graph",
 	"version": "1.0.0",
-	"minAppVersion": "1.0.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
-	"isDesktopOnly": false
+	"minAppVersion": "1.7.2",
+	"description": "Visualize how your code files connect — imports, calls, inheritance, implements, comment-links, ADRs, and tests — as an interactive graph alongside your notes.",
+	"author": "Joshua Williams",
+	"authorUrl": "https://github.com/mrjw717",
+	"fundingUrl": "buymeacoffee.com/JoshuaWilliams",
+	"isDesktopOnly": true
 }

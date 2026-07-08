@@ -18,5 +18,14 @@ main.js
 # obsidian
 data.json
 
+# tree-sitter WASM assets (copied at build time from node_modules)
+wasm
+
+# Generated embedded-wasm module (base64 constants, regenerated each build)
+src/indexer/wasm-embedded.ts
+
+# Dev logs
+.logs
+
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store

@@ -1,114 +1,305 @@
 import {
-	Editor,
-	MarkdownView,
-	MarkdownFileInfo,
-	Modal,
-	Notice,
 	Plugin,
+	FileSystemAdapter,
+	TFile,
+	TAbstractFile,
+	WorkspaceLeaf,
+	Notice,
 } from 'obsidian';
 import {
+	CodeGraphSettingTab,
+	CURRENT_SETTINGS_VERSION,
 	DEFAULT_SETTINGS,
-	MyPluginSettings,
-	SampleSettingTab,
+	type CodeGraphSettings,
 } from './settings';
+import { CodeIndexer, type ExtractResult } from './indexer/CodeIndexer';
+import { setFsAccess } from './indexer/tree-sitter';
+import { CodeGraphView } from './ui/GraphView';
+import { mergeWithMdLinks } from './graph/merger';
+import { registerSeedDomainsCommand } from './commands/seedDomains';
+import type { GraphModel } from './types';
 
-// Remember to rename these classes and interfaces!
+export const VIEW_TYPE_CODE_GRAPH = 'code-graph-view';
 
-export default class MyPlugin extends Plugin {
-	settings!: MyPluginSettings;
+export default class CodeGraphPlugin extends Plugin {
+	settings!: CodeGraphSettings;
+	graphModel: GraphModel | null = null;
+
+	private indexer!: CodeIndexer;
+	private extract: ExtractResult | null = null;
+	private reindexTimer: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		this.indexer = new CodeIndexer({
+			app: this.app,
+			getSettings: () => this.settings,
+			getPluginDir: () => this.getPluginDir(),
+		});
+		setFsAccess({ getPluginDir: () => this.getPluginDir() });
+
+		this.registerView(
+			VIEW_TYPE_CODE_GRAPH,
+			(leaf) => new CodeGraphView(leaf, this),
+		);
+		// Route code extensions vscode-editor doesn't cover by default (tsx, jsx,
+		// h, cc, ...) to its Monaco view. Two benefits: Obsidian starts tracking
+		// them (so they appear in the graph) AND they open with full syntax
+		// highlighting. Requires vscode-editor to be enabled.
+		this.registerCodeEditorExtensions();
+
+		this.addSettingTab(new CodeGraphSettingTab(this.app, this));
+
+		this.addRibbonIcon('git-graph', 'Open code graph', () => {
+			void this.activateView();
 		});
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			},
+			id: 'open',
+			name: 'Open graph view',
+			callback: () => void this.activateView(),
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (
-				editor: Editor,
-				_ctx: MarkdownView | MarkdownFileInfo,
-			) => {
-				editor.replaceSelection('Sample editor command');
-			},
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView =
-					this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+		this.addCommand({
+			id: 'reindex',
+			name: 'Reindex files',
+			callback: () => void this.reindex(),
+		});
+
+		registerSeedDomainsCommand(this);
+
+		// Code/note file changes -> debounced full re-parse.
+		this.registerEvent(this.app.vault.on('modify', (f) => this.onFileChange(f)));
+		this.registerEvent(this.app.vault.on('create', (f) => this.onFileChange(f)));
+		this.registerEvent(this.app.vault.on('delete', (f) => this.onFileChange(f)));
+		this.registerEvent(this.app.vault.on('rename', (f) => this.onFileChange(f)));
+
+		// Markdown link changes -> cheap re-merge (no re-parse).
+		this.registerEvent(
+			this.app.metadataCache.on('changed', () => this.scheduleRemerge()),
+		);
+	}
+
+	async activateView(): Promise<void> {
+		const { workspace } = this.app;
+		let leaf: WorkspaceLeaf | undefined =
+			workspace.getLeavesOfType(VIEW_TYPE_CODE_GRAPH)[0];
+		if (!leaf) {
+			// Open as a full tab in the main area so it's clearly distinct from
+			// Obsidian's native graph view (which lives in its own tab too).
+			leaf = workspace.getLeaf('tab');
+			await leaf.setViewState({
+				type: VIEW_TYPE_CODE_GRAPH,
+				active: true,
+			});
+		}
+		if (leaf) await workspace.revealLeaf(leaf);
+	}
+
+	getPluginDir(): string {
+		const adapter = this.app.vault.adapter;
+		const dir = this.manifest.dir;
+		if (adapter instanceof FileSystemAdapter && dir) {
+			return adapter.getFullPath(dir);
+		}
+		throw new Error('[code-graph] requires the desktop filesystem adapter');
+	}
+
+	/**
+	 * Register code extensions that vscode-editor doesn't cover by default so
+	 * they point at vscode-editor's Monaco view. Effect: (1) Obsidian tracks
+	 * those files so the indexer sees them, and (2) clicking opens them with
+	 * syntax highlighting. Skips vscode-editor's own defaults to avoid clashes
+	 * and no-ops if vscode-editor isn't enabled.
+	 */
+	private registerCodeEditorExtensions(): void {
+		const plugins = (
+			this.app as unknown as {
+				plugins?: {
+					enabledPlugins?: { has: (id: string) => boolean };
+				};
+			}
+		).plugins;
+		const enabled = plugins?.enabledPlugins?.has('vscode-editor') ?? false;
+		if (!enabled) return;
+		const vscodeDefaults = new Set([
+			'ts',
+			'js',
+			'py',
+			'css',
+			'c',
+			'cpp',
+			'go',
+			'rs',
+			'java',
+			'lua',
+			'php',
+		]);
+		const gaps = this.settings.codeExtensions.filter(
+			(ext) => !vscodeDefaults.has(ext),
+		);
+		if (gaps.length === 0) return;
+		try {
+			this.registerExtensions(gaps, 'vscode-editor');
+		} catch {
+			// view type not registered yet; ignore
+		}
+	}
+
+	private isCodeOrNote(file: TFile): boolean {
+		const ext = (file.extension ?? '').toLowerCase();
+		return ext === 'md' || this.settings.codeExtensions.includes(ext);
+	}
+
+	private onFileChange(file: TAbstractFile): void {
+		if (file instanceof TFile && this.isCodeOrNote(file)) {
+			this.scheduleReindex();
+		}
+	}
+
+	private scheduleReindex(): void {
+		if (this.reindexTimer !== null) window.clearTimeout(this.reindexTimer);
+		this.reindexTimer = window.setTimeout(() => {
+			void this.reindex();
+		}, 700);
+	}
+
+	private scheduleRemerge(): void {
+		if (this.reindexTimer !== null) window.clearTimeout(this.reindexTimer);
+		this.reindexTimer = window.setTimeout(() => {
+			this.rebuildModel();
+		}, 300);
+	}
+
+	/** Full re-parse of all code files + re-merge of markdown links. */
+	async reindex(): Promise<void> {
+		try {
+			this.extract = await this.indexer.extract();
+			this.rebuildModel();
+			const model = this.graphModel;
+			const s = model?.stats;
+			const scan = this.extract.scan;
+
+			// Per-type counts (the existing summary).
+			const byType: Record<string, number> = {};
+			// Per-language-per-type counts — surfaces "is language X producing
+			// calls/inherits, or only imports?" at a glance, so the user can
+			// self-diagnose "why am I only seeing one edge color".
+			const byLang = new Map<string, Record<string, number>>();
+			for (const e of model?.edges ?? []) {
+				byType[e.type] = (byType[e.type] ?? 0) + 1;
+				const lang = model?.nodes[e.src]?.lang ?? 'note';
+				let bucket = byLang.get(lang);
+				if (!bucket) {
+					bucket = {};
+					byLang.set(lang, bucket);
 				}
-				return false;
-			},
-		});
+				bucket[e.type] = (bucket[e.type] ?? 0) + 1;
+			}
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+			// Compact per-language line: "TS: 12 imp · 3 call | JS: 4 imp | ..."
+			// Only languages with at least one edge are shown.
+			const TYPE_ABBR: Record<string, string> = {
+				imports: 'imp',
+				calls: 'call',
+				inherits: 'inh',
+				implements: 'impl',
+				contains: 'cont',
+				'uses-type': 'type',
+				'comment-link': 'cmt',
+				'md-link': 'md',
+			};
+			const langLine = Array.from(byLang.entries())
+				// Most-active languages first for skimmability.
+				.sort(([, a], [, b]) => {
+					const sa = Object.values(a).reduce((x, y) => x + y, 0);
+					const sb = Object.values(b).reduce((x, y) => x + y, 0);
+					return sa < sb ? 1 : -1;
+				})
+				.map(([lang, counts]) => {
+					const parts = Object.entries(counts)
+						.map(([t, n]) => `${n} ${TYPE_ABBR[t] ?? t}`)
+						.join(' · ');
+					return `${lang}: ${parts}`;
+				})
+				.join(' | ');
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(activeDocument, 'click', (_evt: MouseEvent) => {
-			new Notice('Click');
-		});
+			const parseInfo =
+				scan.parsed < scan.codeFiles
+					? `\n⚠ tree-sitter: ${scan.parsed}/${scan.codeFiles} parsed${
+							scan.parseFailures.length > 0
+								? ` (${scan.parseFailures.length} failures — see console)`
+								: ''
+						}`
+					: '';
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(
-			window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000),
-		);
+			new Notice(
+				`Code graph: ${s?.codeFiles ?? 0} files, ${s?.symbolNodes ?? 0} symbols, ${s?.edgeCount ?? 0} edges (${scan.excluded}/${scan.total} excluded)\n` +
+					`imp ${byType.imports ?? 0} · call ${byType.calls ?? 0} · inh ${byType.inherits ?? 0} · impl ${byType.implements ?? 0} · cont ${byType.contains ?? 0} · cmt ${byType['comment-link'] ?? 0} · md ${byType['md-link'] ?? 0}` +
+					parseInfo +
+					(langLine ? `\n${langLine}` : ''),
+				8000,
+			);
+		} catch (err) {
+			console.error('[code-graph] reindex failed', err);
+			new Notice('Code graph: reindex failed (see console)');
+		}
 	}
 
-	onunload() {}
-
-	async loadSettings() {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<MyPluginSettings>,
+	/** Recompute the final model from cached code data + live markdown links. */
+	rebuildModel(): void {
+		if (!this.extract) return;
+		this.graphModel = mergeWithMdLinks(
+			this.extract.nodes,
+			this.extract.codeEdges,
+			this.app.metadataCache.resolvedLinks,
+			this.settings.includeMdLinks,
 		);
+		this.refreshViews();
 	}
 
-	async saveSettings() {
+	/** Re-render any open graph views. */
+	refreshViews(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(
+			VIEW_TYPE_CODE_GRAPH,
+		)) {
+			const view = leaf.view;
+			if (view instanceof CodeGraphView) view.renderGraph();
+		}
+	}
+
+	async loadSettings(): Promise<void> {
+		const saved = (await this.loadData()) as Partial<CodeGraphSettings> | null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+		// Deep-merge edgeTypesEnabled: Object.assign is shallow, so a persisted
+		// edgeTypesEnabled with any keys missing (or set false by a dev toggle)
+		// would clobber the entire default object. Without this, "additional
+		// edges are not working" is caused by a stale { calls: false, ... }
+		// surviving the shallow merge and silently filtering every non-import
+		// edge out of the graph view. Merge key-by-key so every edge type
+		// always has a defined boolean, defaulting to true for any type absent
+		// from saved settings.
+		this.settings.edgeTypesEnabled = {
+			...DEFAULT_SETTINGS.edgeTypesEnabled,
+			...(saved?.edgeTypesEnabled ?? {}),
+		};
+		// When defaults change (version bump), re-seed list-shaped settings so
+		// existing users pick up new entries instead of keeping stale short lists.
+		// edgeTypesEnabled is also reset because earlier dev builds persisted
+		// { calls: false, inherits: false, ... } which silently hid every
+		// non-import edge. The deep-merge above preserves user choices — but
+		// these were never user choices, they were stale dev defaults.
+		if (!saved || saved.settingsVersion !== CURRENT_SETTINGS_VERSION) {
+			this.settings.settingsVersion = CURRENT_SETTINGS_VERSION;
+			this.settings.excludeFolders = DEFAULT_SETTINGS.excludeFolders;
+			this.settings.codeExtensions = DEFAULT_SETTINGS.codeExtensions;
+			this.settings.edgeTypesEnabled = { ...DEFAULT_SETTINGS.edgeTypesEnabled };
+			await this.saveSettings();
+		}
+	}
+
+	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	onOpen() {
-		const { contentEl } = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
 	}
 }

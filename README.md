@@ -1,92 +1,128 @@
-# Obsidian Sample Plugin
+# Code Graph
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+> Visualize how your code files connect — imports, calls, inheritance,
+> implements, comment-links, ADRs, and tests — as an interactive graph
+> alongside your notes.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+Code Graph turns your vault into a navigable knowledge graph of your
+codebase. It parses source files with [tree-sitter](https://tree-sitter.github.io/),
+extracts typed relationships (imports, calls, inheritance, containment, and
+more), and renders them as a force-directed graph you can explore, filter, and
+drill into — right next to your Obsidian notes.
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
+## Features
 
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and outputs a Notice on click.
-- Registers a global interval which logs 'setInterval' to the console.
+- **Structural edges** — imports, calls, inherits, implements, uses-type, and
+  contains relationships, extracted via tree-sitter AST parsing for
+  TypeScript, TSX, JavaScript, and Python. Imports-only support for CSS, C,
+  C++, Go, Rust, Java, Lua, and PHP.
+- **Documentation protocol** — `@see`, `@tested-by`, `@adr`, `@depends-on`,
+  `@domain`, `@status`, and `@author` tags in code comments become typed graph
+  edges and node metadata. See
+  [the bundled protocol guide](skills/code-graph-protocol.md) for the full
+  spec.
+- **Note ↔ code links** — markdown frontmatter `related-code` creates
+  `documents` edges from notes to code, closing the loop between
+  documentation and implementation.
+- **Seed domains command** — one command discovers a domain vocabulary from
+  your folder structure and stamps `@file` / `@domain` / `@status` headers
+  into code files and `domain:` frontmatter into notes. The fastest way to
+  adopt the protocol across a whole project.
+- **Interactive graph view** — force-directed layout with color modes
+  (language, domain, status, auto-detected community), zone-aura heatmaps,
+  user-defined color groups, node sizing by LOC / degree / fan-in / fan-out,
+  neighborhood-hops filtering, dead-code highlighting, and hover-focus
+  spotlight.
+- **TODO / FIXME visibility** — files with `TODO` comments glow orange; files
+  with `FIXME` comments glow red. Technical debt is visible at a glance.
+- **Symbol-level nodes** — toggle into functions, classes, methods,
+  interfaces, and types as first-class graph nodes inside their containing
+  files.
 
-## First time developing plugins?
+## Quick start
 
-Quick starting guide for new plugin devs:
+1. Install the plugin from Obsidian's community plugin browser, or manually
+   copy `main.js`, `manifest.json`, and `styles.css` into
+   `<vault>/.obsidian/plugins/code-graph/`.
+2. Enable the plugin in **Settings → Community plugins**.
+3. Click the graph ribbon icon, or run **Code Graph: Open graph view** from
+   the command palette.
+4. (Optional) Run **Code Graph: Seed domains from codebase** to auto-tag your
+   files with `@domain` / `@status` headers.
 
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `src/main.ts` to `main.js`.
-- Make changes to `src/main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
+## The Documentation Protocol
 
-## Releasing new releases
+The plugin ships a [full protocol guide](skills/code-graph-protocol.md) for
+writing code comments and markdown frontmatter so the graph extracts maximum
+semantic value. Quick summary:
 
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
-
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
-
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v18 (`node --version`).
-- `npm i` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code.
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-	"fundingUrl": "https://buymeacoffee.com"
-}
+```typescript
+/**
+ * @file Calculator engine — math expression evaluation
+ * @domain calculator
+ * @status stable
+ * @author Josh
+ *
+ * @see [[Shunting Yard Algorithm]]
+ * @tested-by [[engine.test.ts]]
+ * @adr [[ADR-001-Calculator-Architecture]]
+ */
 ```
 
-If you have multiple URLs, you can also do:
-
-```json
-{
-	"fundingUrl": {
-		"Buy Me a Coffee": "https://buymeacoffee.com",
-		"GitHub Sponsor": "https://github.com/sponsors",
-		"Patreon": "https://www.patreon.com/"
-	}
-}
+```yaml
+---
+related-code:
+  - "[[engine.ts]]"
+domain: calculator
+type: adr
+status: accepted
+tags: [calculator, architecture]
+---
 ```
 
-## API Documentation
+See the [protocol guide](skills/code-graph-protocol.md) for the complete tag
+reference, language support matrix, and the checklist for AI documentation
+agents.
 
-See https://docs.obsidian.md
+## Language support
+
+| Tier | Languages | Edges |
+|------|-----------|-------|
+| **Full structural** (tree-sitter AST) | TypeScript, TSX, JavaScript, Python | imports, calls, inherits, implements, uses-type, contains, symbol nodes |
+| **Imports-only** (regex) | CSS, C, C++, Go, Rust, Java, Lua, PHP | imports only |
+
+The `@tag` / `[[wikilink]]` / `TODO` / `FIXME` / frontmatter protocol works in
+**any language** — only the structural edges differ. See the
+[protocol guide](skills/code-graph-protocol.md#language-support) for details
+on adding a language to the full-structural tier.
+
+## Requirements
+
+- **Obsidian 1.7.2 or later.**
+- **Desktop only.** The plugin uses Node's `fs` module to load tree-sitter
+  WASM grammars, which is not available in Obsidian's mobile environment.
+
+## Development
+
+```bash
+npm install      # install dependencies
+npm run dev      # watch mode — rebuild on save
+npm run build    # production build (tsc typecheck + esbuild minified)
+npm run lint     # ESLint with eslint-plugin-obsidianmd
+```
+
+### Release artifacts
+
+The build produces `main.js`, `manifest.json`, and `styles.css` at the plugin
+root. These are the files to attach to a GitHub release. The `wasm/` folder
+(tree-sitter runtime + grammars) is generated by the build and must also be
+shipped — see [CONTRIBUTING](#) for details.
+
+## Funding
+
+If Code Graph saves you time, consider
+[buying Joshua a coffee](https://buymeacoffee.com/JoshuaWilliams).
+
+## License
+
+0-BSD. See [LICENSE](LICENSE).

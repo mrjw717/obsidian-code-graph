@@ -3,6 +3,527 @@
 This CSS file will be included with your plugin, and
 available in the app when your plugin is enabled.
 
-If your plugin does not need CSS, delete this file.
-
 */
+
+/* ===== Layout ===== */
+
+.code-graph-view {
+	position: relative;
+	height: 100%;
+	width: 100%;
+	overflow: hidden;
+	background: var(--background-primary);
+}
+
+.code-graph-canvas {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+}
+
+.code-graph-canvas > p {
+	padding: 16px;
+	color: var(--text-muted);
+}
+
+.code-graph-empty {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.code-graph-canvas .vis-tooltip {
+	font-size: var(--font-ui-smaller);
+}
+
+/* ===== Floating status pill ===== */
+
+.code-graph-status {
+	position: absolute;
+	left: 12px;
+	bottom: 12px;
+	z-index: 4;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	padding: 2px 10px;
+	pointer-events: none;
+}
+
+/* ===== Floating, collapsible panel (native-graph style) ===== */
+
+.code-graph-panel {
+	position: absolute;
+	top: 12px;
+	left: 12px;
+	z-index: 5;
+	width: 248px;
+	max-height: calc(100% - 24px);
+	overflow-y: auto;
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	box-shadow: var(--shadow-border-glow);
+	font-size: var(--font-ui-small);
+}
+
+.code-graph-panel.is-collapsed {
+	width: auto;
+	max-height: none;
+	overflow: visible;
+}
+
+.code-graph-panel-expand {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 34px;
+	height: 34px;
+	padding: 0;
+	background: transparent;
+	color: var(--text-muted);
+	border: none;
+	border-radius: 8px;
+	cursor: pointer;
+}
+
+.code-graph-panel-expand:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.code-graph-panel-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 8px 8px 6px 12px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.code-graph-panel-title {
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
+}
+
+.code-graph-icon-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	background: transparent;
+	color: var(--text-muted);
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+.code-graph-icon-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.code-graph-panel-body {
+	padding: 10px 12px 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+/* ===== Search input ===== */
+
+.code-graph-search input,
+.code-graph-search {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.code-graph-search input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 5px 8px;
+	font-size: var(--font-ui-small);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	color: var(--text-normal);
+}
+
+/* ===== Collapsible sections ===== */
+
+.code-graph-section {
+	border-radius: 6px;
+	overflow: hidden;
+}
+
+.code-graph-section-header {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 6px;
+	cursor: pointer;
+	border-radius: 6px;
+	user-select: none;
+}
+
+.code-graph-section-header:hover {
+	background: var(--background-modifier-hover);
+}
+
+.code-graph-chevron svg {
+	width: 14px;
+	height: 14px;
+	color: var(--text-muted);
+	flex-shrink: 0;
+}
+
+.code-graph-section-title {
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.code-graph-section-body {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 2px 0 4px;
+}
+
+/* ===== Legend rows (edge + node toggles) ===== */
+
+.code-graph-legend-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 5px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+	user-select: none;
+	opacity: 0.4;
+	transition: opacity 0.12s, background 0.12s;
+}
+
+.code-graph-legend-row:hover {
+	background: var(--background-modifier-hover);
+}
+
+.code-graph-legend-row.is-on {
+	opacity: 1;
+}
+
+.code-graph-legend-row.is-disabled {
+	opacity: 0.6;
+	cursor: default;
+}
+
+.code-graph-legend-row.is-disabled:hover {
+	background: transparent;
+}
+
+/* --- Edge line preview --- */
+
+.code-graph-edge-preview {
+	width: 28px;
+	height: 0;
+	border-top: 2.5px solid var(--cg-color, #888);
+	border-radius: 2px;
+	flex-shrink: 0;
+}
+
+.code-graph-edge-preview.is-dashed {
+	border-top-style: dashed;
+}
+
+/* --- Node dot preview --- */
+
+.code-graph-node-preview {
+	width: var(--cg-size, 12px);
+	height: var(--cg-size, 12px);
+	border-radius: 50%;
+	background: var(--cg-color, #888);
+	flex-shrink: 0;
+}
+
+/* --- Label --- */
+
+.code-graph-legend-label {
+	flex: 1;
+	font-size: var(--font-ui-small);
+	color: var(--text-normal);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* --- Toggle indicator dot --- */
+
+.code-graph-toggle-dot {
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	border: 2px solid var(--cg-color, #888);
+	background: var(--cg-color, #888);
+	flex-shrink: 0;
+	transition: background 0.12s;
+}
+
+.code-graph-legend-row:not(.is-on) .code-graph-toggle-dot {
+	background: transparent;
+}
+
+/* ===== Sizing controls ===== */
+
+.code-graph-mode-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin-bottom: 6px;
+}
+
+.code-graph-flex-1 {
+	flex: 1;
+}
+
+.code-graph-pointer {
+	cursor: pointer;
+}
+
+.code-graph-mode-btn {
+	font-size: var(--font-ui-smaller);
+	padding: 3px 8px;
+	border-radius: 5px;
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+	cursor: pointer;
+	user-select: none;
+	opacity: 0.6;
+	transition: opacity 0.12s, background 0.12s;
+}
+
+.code-graph-mode-btn:hover {
+	opacity: 0.85;
+}
+
+.code-graph-mode-btn.is-active {
+	opacity: 1;
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: var(--font-semibold);
+}
+
+.code-graph-slider-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 2px 0;
+}
+
+.code-graph-slider-label {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	width: 28px;
+	flex-shrink: 0;
+}
+
+.code-graph-slider {
+	flex: 1;
+	height: 4px;
+	-webkit-appearance: none;
+	appearance: none;
+	background: var(--background-modifier-border);
+	border-radius: 2px;
+	outline: none;
+	cursor: pointer;
+}
+
+.code-graph-slider::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	cursor: pointer;
+}
+
+.code-graph-slider::-moz-range-thumb {
+	width: 14px;
+	height: 14px;
+	border: none;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	cursor: pointer;
+}
+
+.code-graph-slider-val {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-normal);
+	width: 24px;
+	text-align: right;
+	flex-shrink: 0;
+	font-variant-numeric: tabular-nums;
+}
+
+/* ===== File type count badge ===== */
+
+.code-graph-legend-count {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	margin-left: auto;
+	padding-right: 4px;
+	font-variant-numeric: tabular-nums;
+}
+
+.code-graph-hint {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	font-style: italic;
+	padding: 4px 0;
+}
+
+/* ===== Action buttons ===== */
+
+.code-graph-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 5px;
+}
+
+.code-graph-action-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 4px 8px;
+	font-size: var(--font-ui-smaller);
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.code-graph-action-btn:hover {
+	background: var(--background-modifier-hover);
+}
+
+.code-graph-action-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+/* ===== Settings textareas ===== */
+
+.code-graph-wide-setting {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 6px;
+}
+
+.code-graph-wide-setting .setting-item-control {
+	width: 100%;
+}
+
+.code-graph-textarea {
+	width: 100%;
+	min-height: 200px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smaller);
+	resize: vertical;
+}
+
+/* ===== Fallback plaintext editor view ===== */
+
+.code-graph-text-view-container {
+	height: 100%;
+	width: 100%;
+	padding: 0;
+}
+
+.code-graph-text-editor {
+	width: 100%;
+	height: 100%;
+	min-height: 60vh;
+	border: none;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-family: var(--font-monospace);
+	font-size: var(--font-code-size);
+	line-height: var(--line-height-normal);
+	padding: var(--size-4-4);
+	resize: none;
+	outline: none;
+	tab-size: 2;
+}
+
+/* ── Seed domains modal ── */
+.code-graph-seed-modal {
+	max-width: 720px;
+}
+
+.code-graph-seed-table-wrap {
+	max-height: 360px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	margin: 0.5em 0 1em;
+}
+
+.code-graph-seed-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--font-smaller-size);
+}
+
+.code-graph-seed-table th,
+.code-graph-seed-table td {
+	text-align: left;
+	padding: 4px 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.code-graph-seed-table th {
+	position: sticky;
+	top: 0;
+	background: var(--background-secondary);
+	font-weight: 600;
+}
+
+.code-graph-seed-table tbody tr:hover {
+	background: var(--background-modifier-hover);
+}
+
+.code-graph-seed-overwrite td {
+	color: var(--text-warning);
+	font-size: var(--font-smallest-size);
+}
+
+.code-graph-seed-edit {
+	margin: 0.5em 0 1em;
+}
+
+.code-graph-seed-rename-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin: 4px 0;
+}
+
+.code-graph-seed-rename-row input {
+	flex: 1;
+}
+
+.code-graph-seed-buttons {
+	display: flex;
+	gap: 8px;
+	justify-content: flex-end;
+}

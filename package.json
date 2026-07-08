@@ -1,19 +1,28 @@
 {
-	"name": "obsidian-sample-plugin",
+	"name": "obsidian-code-graph",
 	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"description": "Code Graph — visualize code relationships as an interactive graph inside Obsidian.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
-		"dev": "node esbuild.config.mjs",
-		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"dev": "node scripts/embed-wasm.mjs && node esbuild.config.mjs",
+		"build": "node scripts/embed-wasm.mjs && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
-		"lint": "eslint ."
+		"lint": "eslint .",
+		"test": "vitest run"
 	},
-	"keywords": [],
+	"keywords": [
+		"obsidian",
+		"code-graph",
+		"knowledge-graph",
+		"tree-sitter",
+		"dependency-graph",
+		"code-visualization"
+	],
 	"license": "0-BSD",
 	"devDependencies": {
 		"@eslint/js": "^9.39.4",
+		"@repomix/tree-sitter-wasms": "^0.1.17",
 		"@types/node": "^22.15.17",
 		"esbuild": "0.25.5",
 		"eslint": "^9.39.4",
@@ -22,6 +31,11 @@
 		"jiti": "^2.6.1",
 		"obsidian": "latest",
 		"typescript": "^5.8.3",
-		"typescript-eslint": "^8.59.1"
+		"typescript-eslint": "^8.59.1",
+		"vitest": "^4.1.10"
+	},
+	"dependencies": {
+		"vis-network": "^10.1.0",
+		"web-tree-sitter": "^0.26.10"
 	}
 }
