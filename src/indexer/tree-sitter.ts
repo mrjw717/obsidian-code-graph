@@ -63,7 +63,7 @@ function ensureWasmFile(relativePath: string, filename: string): boolean {
 		fs.mkdirSync(path.dirname(fullPath), { recursive: true });
 		fs.writeFileSync(fullPath, embedded);
 		return true;
-	} catch (err) {
+	} catch (err: unknown) {
 		console.warn(`[code-graph] failed to write embedded wasm ${filename}:`, err);
 		return false;
 	}

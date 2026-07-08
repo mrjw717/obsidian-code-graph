@@ -7,6 +7,8 @@
 	"scripts": {
 		"dev": "node scripts/embed-wasm.mjs && node esbuild.config.mjs",
 		"build": "node scripts/embed-wasm.mjs && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"prelint": "node scripts/embed-wasm.mjs",
+		"pretest": "node scripts/embed-wasm.mjs",
 		"version": "node version-bump.mjs && git add manifest.json versions.json",
 		"lint": "eslint .",
 		"test": "vitest run"
