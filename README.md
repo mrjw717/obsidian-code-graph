@@ -74,20 +74,64 @@ filter, and drill into — right next to your Obsidian notes.
 
 ## Edge types
 
-| Edge | Color | Source | Meaning |
-|------|-------|--------|---------|
-| imports | `#8b5cf6` | AST / regex | File A imports from file B |
-| calls | `#3b82f6` | AST | File A calls a symbol in file B |
-| contains | `#6b7280` | AST | File A contains symbol B |
-| inherits | `#ec4899` | AST | Class A extends class B |
-| implements | `#14b8a6` | AST | Class A implements interface B |
-| uses-type | `#a855f7` | AST | Symbol A references type B |
-| tested-by | `#22c55e` | `@tested-by` | Code A is verified by test B |
-| adr-link | `#eab308` | `@adr` | Code A is governed by decision B |
-| depends-on | `#f97316` | `@depends-on` | Code A depends on concept B |
-| documents | `#6366f1` | frontmatter | Note A documents code B |
-| comment-link | `#16a34a` | `@see` / `[[wikilink]]` | Comment references B |
-| md-link | `#9ca3af` | Obsidian links | Note A links to note B |
+Every edge below is produced **automatically** when code follows ordinary
+conventions — static imports, `extends`/`implements`, type annotations, and the
+`@tag`/`[[wikilink]]`/frontmatter protocol. Write idiomatic, well-documented
+code and the graph fills in. The first six edges come from the AST/regex parser;
+the rest come from the documentation protocol.
+
+| Edge | Color | Source | Meaning | Produced by |
+|------|-------|--------|---------|-------------|
+| imports | `#8b5cf6` | AST / regex | File A imports from file B | `import` / `require` / `#include` / `use` / `@import` |
+| calls | `#3b82f6` | AST | File A calls a symbol in file B | call to an exported function/method |
+| contains | `#6b7280` | AST | File A contains symbol B | defining a function/class/interface in a file |
+| inherits | `#ec4899` | AST | Class A extends class B | `extends` |
+| implements | `#14b8a6` | AST | Class A implements interface B | `implements` |
+| uses-type | `#a855f7` | AST | Symbol A references type B | type annotation referencing another file's type |
+| tested-by | `#22c55e` | `@tested-by` | Code A is verified by test B | `@tested-by [[test-file]]` in a comment |
+| adr-link | `#eab308` | `@adr` | Code A is governed by decision B | `@adr [[ADR-note]]` in a comment |
+| depends-on | `#f97316` | `@depends-on` | Code A depends on concept B | `@depends-on [[service-or-concept]]` |
+| documents | `#6366f1` | frontmatter | Note A documents code B | `related-code: [[file]]` in note frontmatter |
+| comment-link | `#16a34a` | `@see` / `[[wikilink]]` | Comment references B | `@see [[X]]`, `[[X]]`, `@link x`, `ref: [[x]]` |
+| md-link | `#9ca3af` | Obsidian links | Note A links to note B | `[[wikilink]]` in a note's body |
+
+> For per-edge optimization guidance — exactly what to write to maximize each
+> edge honestly — see **§5 Edge-maximization guide** in the
+> [skill guide](skills/obsidian-code-graph/skill.md).
+
+## Node types
+
+Nodes come in two layers. **File-level** nodes are always rendered; **symbol**
+nodes (shown when **Show symbols** is on) nest inside their containing file via
+`contains` edges.
+
+| Node kind | Layer | Color | Produced by |
+|-----------|-------|-------|-------------|
+| `code` | file | by language (see below) | any file matching a configured code extension |
+| `note` | file | note color | any `.md` file (when **Show notes** is on) |
+| `other` | file | neutral | any other recognized file |
+| `function` | symbol | `#f59e0b` amber | top-level / exported `function` |
+| `class` | symbol | `#ef4444` red | `class` declaration |
+| `method` | symbol | `#10b981` emerald | method declared inside a class |
+| `interface` | symbol | `#a855f7` purple | `interface` declaration |
+| `variable` | symbol | `#84cc16` lime | top-level `const` / `let` / `var` |
+| `type` | symbol | `#ec4899` pink | `type` alias |
+| `enum` | symbol | `#eab308` yellow | `enum` declaration |
+| `constant` | symbol | `#14b8a6` teal | named constant |
+
+Symbol nodes are available in **Tier A** languages only (TypeScript, TSX,
+JavaScript, Python). Tier B languages produce file-level nodes plus `imports`
+edges, and still fully support the `@tag` / `[[wikilink]]` / `TODO` / `FIXME` /
+frontmatter protocol. Node fill color follows the active **Color mode**:
+language (default), domain (`@domain`), status (`@status`), or auto-detected
+community. Symbol colors deliberately avoid blue, which is reserved for file
+nodes.
+
+Each node also carries metadata the plugin surfaces: `domain`, `status`,
+`author` (hover tooltip), `tags`, `todoCount`/`fixmeCount` (orange/red glow),
+and `lines`/fan-in/fan-out (node sizing). Writing the `@tags` and frontmatter
+documented in the [skill guide](skills/obsidian-code-graph/skill.md) populates
+all of this automatically.
 
 ---
 
@@ -106,11 +150,14 @@ filter, and drill into — right next to your Obsidian notes.
 
 ## The documentation protocol
 
-The plugin ships a [full protocol guide](skills/code-graph-protocol.md) for
-writing code comments and markdown frontmatter so the graph extracts maximum
-semantic value.
+The plugin ships an **AI-ready skill** — [`skills/obsidian-code-graph/skill.md`](skills/obsidian-code-graph/skill.md) —
+that tells AI agents (and humans) exactly how to write code comments, file
+headers, and markdown frontmatter so the graph extracts maximum semantic value.
+Load it into your AI coding agent, or read it directly. When code adheres to the
+protocol below, the graph populates automatically — every `@tag`, `[[link]]`,
+and frontmatter field becomes a typed edge or node attribute.
 
-**Code files:**
+**Code files** — Tier 1 header + typed links:
 
 ```typescript
 /**
@@ -122,10 +169,11 @@ semantic value.
  * @see [[Shunting Yard Algorithm]]
  * @tested-by [[engine.test.ts]]
  * @adr [[ADR-001-Calculator-Architecture]]
+ * @depends-on [[MathEngine]]
  */
 ```
 
-**Markdown notes:**
+**Markdown notes** — frontmatter closes the code↔docs loop:
 
 ```yaml
 ---
@@ -138,9 +186,11 @@ tags: [calculator, architecture]
 ---
 ```
 
-See the [protocol guide](skills/code-graph-protocol.md) for the complete tag
-reference, language support matrix, and the checklist for AI documentation
-agents.
+The [skill guide](skills/obsidian-code-graph/skill.md) contains the full tag
+reference, per-edge and per-node optimization guidance, the language support
+matrix, a domain auto-detection procedure for AI agents, and a verification
+checklist. **Point your AI agent at it** and it will detect your codebase's
+domains, offer them as suggestions, and document files to maximize graph edges.
 
 ---
 
@@ -153,8 +203,8 @@ agents.
 
 The `@tag` / `[[wikilink]]` / `TODO` / `FIXME` / frontmatter protocol works in
 **any language** — only the structural edges differ. See the
-[protocol guide](skills/code-graph-protocol.md#language-support) for details on
-adding a language to the full-structural tier.
+[skill guide](skills/obsidian-code-graph/skill.md#7-language-support-matrix) for
+details on adding a language to the full-structural tier.
 
 ---
 
