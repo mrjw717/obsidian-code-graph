@@ -1,4 +1,8 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
+import type {
+	SettingDefinitionItem,
+	SettingGroupItem,
+} from 'obsidian';
 import type CodeGraphPlugin from './main';
 import { ALL_EDGE_TYPES, EDGE_STYLE, type EdgeType } from './types';
 
@@ -193,6 +197,208 @@ export class CodeGraphSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	/**
+	 * Keys whose change requires re-parsing the vault. Everything else only
+	 * needs the graph views re-rendered.
+	 */
+	private static readonly INDEXING_KEYS = new Set([
+		'codeExtensions',
+		'excludeFolders',
+		'excludeFileTypes',
+	]);
+
+	/**
+	 * Declarative settings (Obsidian 1.13.0+): Obsidian renders, search-indexes,
+	 * reads, writes, and persists every control here, and SKIPS display() when
+	 * this method exists. Values flow through getControlValue/setControlValue
+	 * below, where list-shaped settings are serialized/normalized and change
+	 * side effects (reindex vs. re-render) are applied.
+	 */
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		const edgeTypeItems: SettingGroupItem[] = ALL_EDGE_TYPES.map(
+			(type): SettingGroupItem => ({
+				name: EDGE_STYLE[type].label,
+				desc: `Extract and display "${type}" edges.`,
+				control: {
+					type: 'toggle',
+					key: `edgeTypesEnabled.${type}`,
+				},
+			}),
+		);
+
+		return [
+			{
+				type: 'group',
+				heading: 'Indexing',
+				items: [
+					{
+						name: 'Code file extensions',
+						desc: 'Comma-separated extensions (no dots) treated as code files.',
+						control: {
+							type: 'text',
+							key: 'codeExtensions',
+							placeholder: 'ts, js, py, go...',
+							validate: (value) =>
+								/^[a-zA-Z0-9,.\s]*$/.test(value)
+									? undefined
+									: 'Use comma-separated extensions (letters and digits only).',
+						},
+					},
+					{
+						name: 'Exclude folders',
+						desc: 'One folder per line. Matched at any depth by name (like a folder-name .gitignore).',
+						control: {
+							type: 'textarea',
+							key: 'excludeFolders',
+							rows: 12,
+						},
+					},
+					{
+						name: 'Exclude file types',
+						desc: 'One suffix per line. Files whose name ends with these are skipped (e.g. "d.ts", "min.js", "test.ts").',
+						control: {
+							type: 'textarea',
+							key: 'excludeFileTypes',
+							rows: 8,
+						},
+					},
+					{
+						name: 'Reindex now',
+						desc: 'Force a full re-parse of all code files.',
+						action: () => {
+							void this.plugin.reindex();
+						},
+					},
+				],
+			},
+			{
+				type: 'group',
+				heading: 'Edge types',
+				items: edgeTypeItems,
+			},
+			{
+				type: 'group',
+				heading: 'Behavior',
+				items: [
+					{
+						name: 'Physics simulation',
+						desc: 'Run the force-directed layout in the graph view.',
+						control: { type: 'toggle', key: 'physicsEnabled' },
+					},
+					{
+						name: 'Neighborhood hops',
+						desc: 'When focused on a file, only show nodes within this many hops (0 = whole graph).',
+						control: {
+							type: 'number',
+							key: 'neighborhoodHops',
+							min: 0,
+							step: 1,
+							validate: (value) =>
+								Number.isInteger(value) && value >= 0
+									? undefined
+									: 'Enter a whole number of 0 or more.',
+						},
+					},
+					{
+						name: 'Zone-aura source',
+						desc: 'What drives the heatmap auras behind nodes — independent of the node fill color.',
+						control: {
+							type: 'dropdown',
+							key: 'zoneColorMode',
+							options: {
+								groups: 'Color groups (manual)',
+								community: 'Auto-detected communities',
+								domain: '@domain tags',
+							},
+						},
+					},
+				],
+			},
+		];
+	}
+
+	/** Resolve a dotted key ("edgeTypesEnabled.imports") against settings. */
+	private resolve(key: string): unknown {
+		return key
+			.split('.')
+			.reduce<unknown>(
+				(obj, seg) =>
+					obj !== null && typeof obj === 'object'
+						? (obj as Record<string, unknown>)[seg]
+						: undefined,
+				this.plugin.settings,
+			);
+	}
+
+	/**
+	 * Read a control value. List-shaped settings are serialized to the text
+	 * the user edits; everything else resolves the dotted key directly.
+	 */
+	getControlValue(key: string): unknown {
+		switch (key) {
+			case 'codeExtensions':
+				return this.plugin.settings.codeExtensions.join(', ');
+			case 'excludeFolders':
+				return this.plugin.settings.excludeFolders.join('\n');
+			case 'excludeFileTypes':
+				return this.plugin.settings.excludeFileTypes.join('\n');
+			default:
+				return this.resolve(key);
+		}
+	}
+
+	/**
+	 * Write a control value: normalize list-shaped settings back into their
+	 * stored shape, persist, then apply the change's side effect (full reindex
+	 * for indexing settings, re-render for display settings).
+	 */
+	setControlValue(key: string, value: unknown): void | Promise<void> {
+		const settings = this.plugin.settings;
+		if (key === 'codeExtensions' && typeof value === 'string') {
+			settings.codeExtensions = value
+				.split(',')
+				.map((e) => e.trim().replace(/^\./, '').toLowerCase())
+				.filter((e) => e.length > 0);
+		} else if (key === 'excludeFolders' && typeof value === 'string') {
+			settings.excludeFolders = value
+				.split(/[\n,]/)
+				.map((s) =>
+					s.trim().replace(/^\.?\//, '').replace(/\/+$/, ''),
+				)
+				.filter((s) => s.length > 0);
+		} else if (key === 'excludeFileTypes' && typeof value === 'string') {
+			settings.excludeFileTypes = value
+				.split(/[\n,]/)
+				.map((s) => s.trim().replace(/^\.+/, '').toLowerCase())
+				.filter((s) => s.length > 0);
+		} else if (key.includes('.')) {
+			const [head, ...rest] = key.split('.');
+			if (head !== undefined) {
+				const parent = (
+					settings as unknown as Record<string, unknown>
+				)[head];
+				if (parent !== null && typeof parent === 'object') {
+					(parent as Record<string, unknown>)[rest.join('.')] =
+						value;
+				}
+			}
+		} else {
+			(settings as unknown as Record<string, unknown>)[key] = value;
+		}
+		const result = this.plugin.saveSettings();
+		if (CodeGraphSettingTab.INDEXING_KEYS.has(key)) {
+			void result.then(() => this.plugin.reindex());
+			return;
+		}
+		this.plugin.refreshViews();
+		return result;
+	}
+
+	/**
+	 * Legacy imperative UI for Obsidian < 1.13.0 (which has no declarative
+	 * settings API). On 1.13.0+ Obsidian calls getSettingDefinitions() and
+	 * skips this method entirely.
+	 */
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();

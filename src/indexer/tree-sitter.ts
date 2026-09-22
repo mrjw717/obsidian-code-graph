@@ -16,14 +16,15 @@
  * setAdapterAccess().
  *
  * **Fallback:** if a wasm file is missing on disk (e.g. a fresh install from a
- * GitHub release that only ships main.js + manifest.json), the embedded base64
- * bytes from `wasm-embedded.ts` are materialized via the adapter. This makes
- * the plugin self-contained — no separate wasm download step for end users.
+ * GitHub release that only ships main.js + manifest.json), the embedded gzip
+ * bytes from `wasm-embedded.ts` are inflated and materialized via the adapter.
+ * This makes the plugin self-contained — no separate wasm download step for
+ * end users.
  */
 import { Parser, Language, type Tree } from 'web-tree-sitter';
 import type { DataAdapter } from 'obsidian';
 import { LANG_TO_GRAMMAR } from './profiles';
-import { getEmbeddedWasm } from './wasm-embedded';
+import { getEmbeddedWasmGzip } from './wasm-embedded';
 
 export interface AdapterAccess {
 	/** Obsidian vault adapter used for all wasm reads/writes. */
@@ -78,8 +79,21 @@ async function ensureParentDir(fileRel: string): Promise<void> {
 }
 
 /**
+ * Inflate gzip bytes from the embedded module. DecompressionStream is a
+ * standard web platform API (available in every Chromium Obsidian ships).
+ */
+async function gunzipEmbedded(bytes: Uint8Array): Promise<Uint8Array> {
+	const buffer = bytes.buffer as ArrayBuffer;
+	const stream = new Blob([buffer]).stream().pipeThrough(
+		new DecompressionStream('gzip'),
+	);
+	const inflated = await new Response(stream).arrayBuffer();
+	return new Uint8Array(inflated);
+}
+
+/**
  * Ensure a wasm file exists on disk. If missing, materialize it from the
- * embedded base64 constants (generated at build time) via the adapter. This is
+ * embedded gzip constants (generated at build time) via the adapter. This is
  * the self-contained-install fallback: a fresh GitHub release install has no
  * wasm/ directory, so we write the needed files on first load.
  *
@@ -89,17 +103,18 @@ async function ensureParentDir(fileRel: string): Promise<void> {
 async function ensureWasmFile(relPath: string, filename: string): Promise<boolean> {
 	const { adapter } = requireAccess();
 	if (await adapter.exists(relPath)) return true;
-	const embedded = getEmbeddedWasm(filename);
-	if (!embedded) return false;
+	const gzBytes = getEmbeddedWasmGzip(filename);
+	if (!gzBytes) return false;
 	try {
 		await ensureParentDir(relPath);
-		// Copy the (possibly-viewed) Uint8Array into a standalone ArrayBuffer.
-		// getEmbeddedWasm() returns a Uint8Array allocated as `new Uint8Array(n)`
-		// (see wasm-embedded.ts decode()), so its underlying buffer is always a
-		// real ArrayBuffer of exactly the right length. `Uint8Array.buffer` is
+		// Inflate, then copy into a standalone ArrayBuffer. gunzipEmbedded()
+		// returns a Uint8Array allocated as `new Uint8Array(n)` (via
+		// Response.arrayBuffer()), so its underlying buffer is always a real
+		// ArrayBuffer of exactly the right length. `Uint8Array.buffer` is
 		// typed `ArrayBufferLike` (ArrayBuffer | SharedArrayBuffer); assert to
 		// the concrete ArrayBuffer the adapter expects.
-		const buffer = embedded.buffer as ArrayBuffer;
+		const raw = await gunzipEmbedded(gzBytes);
+		const buffer = raw.buffer as ArrayBuffer;
 		await adapter.writeBinary(relPath, buffer);
 		return true;
 	} catch (err: unknown) {

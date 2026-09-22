@@ -19,6 +19,7 @@ export default defineConfig(
 		'scripts/test-edge-types.ts',
 		'scripts/embed-wasm.mjs',
 		'scripts/copy-wasm.mjs',
+		'scripts/patch-fs.mjs',
 	]),
 	{
 		languageOptions: {

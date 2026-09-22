@@ -27,6 +27,26 @@ function ensureWasmReady() {
 
 ensureWasmReady();
 
+// Stub Node's fs: web-tree-sitter's emscripten runtime has a dead
+// `require("fs")` Node branch (we always pass wasm bytes directly and do all
+// IO via the vault adapter), but the literal reference in main.js trips
+// Obsidian's "Direct Filesystem Access" static-analysis warning. Intercepting
+// at resolve time (rather than esbuild's alias) also covers subpaths like
+// fs/promises without path-mangling.
+const stubNodeFs = {
+	name: 'stub-node-fs',
+	setup(build) {
+		build.onResolve({ filter: /^(node:)?fs(\/.*)?$/ }, (args) => ({
+			path: args.path,
+			namespace: 'stub-node-fs',
+		}));
+		build.onLoad({ filter: /.*/, namespace: 'stub-node-fs' }, () => ({
+			contents: 'module.exports = {};',
+			loader: 'js',
+		}));
+	},
+};
+
 const context = await esbuild.context({
 	banner: {
 		js: banner,
@@ -47,9 +67,10 @@ const context = await esbuild.context({
 		'@lezer/common',
 		'@lezer/highlight',
 		'@lezer/lr',
-		...builtinModules,
+		...builtinModules.filter((m) => m !== 'fs' && m !== 'fs/promises'),
 	],
-		format: 'cjs',
+	plugins: [stubNodeFs],
+	format: 'cjs',
 	target: 'es2021',
 	logLevel: 'info',
 	sourcemap: prod ? false : 'inline',

@@ -7,13 +7,16 @@
  * without running the build — including the Obsidian plugin checker's static
  * analysis, which runs against the repo source without building.
  *
- * The generated module exports:
- *   - EMBEDDED_WASM: Record<string, string> — maps grammar filename → base64
- *   - getEmbeddedWasm(filename: string): Uint8Array | null — decodes + caches
+ * The generated module exports GZIP-compressed wasm bytes (base64-encoded) to
+ * keep main.js under Obsidian's 5 MB sync limit:
+ *   - EMBEDDED_WASM_GZIP: Record<string, string> — grammar filename → base64
+ *   - getEmbeddedWasmGzip(filename: string): Uint8Array | null — decodes the
+ *     base64 into raw gzip bytes + caches. Inflate with DecompressionStream
+ *     before use (see gunzipEmbedded() in src/indexer/tree-sitter.ts).
  */
 
-export declare const EMBEDDED_WASM: Record<string, string>;
+export declare const EMBEDDED_WASM_GZIP: Record<string, string>;
 
-export declare function getEmbeddedWasm(
+export declare function getEmbeddedWasmGzip(
 	filename: string,
 ): Uint8Array | null;
