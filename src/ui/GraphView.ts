@@ -12,6 +12,7 @@ import { applyFolderClustering, applyCommunityClustering, folderKey } from './cl
 import { discoverDomains } from '../commands/seedDomains';
 import { drawEdgeAnimation, shouldAnimateEdges } from './edgeAnimation';
 import type { EdgeAnimInfo } from './edgeAnimation';
+import { computeHoverSizeUpdates, focusedBaseSize } from './hoverFocus';
 import {
 	ALL_EDGE_TYPES,
 	EDGE_STYLE,
@@ -2033,15 +2034,21 @@ export class CodeGraphView extends ItemView {
 	/**
 	 * Pop the focused node to 1.3x its base size; restore everything else.
 	 * Only touches the hovered node + the previously-hovered one.
+	 *
+	 * Updates are computed by computeHoverSizeUpdates(), which intersects
+	 * nodeBaseSize against the LIVE DataSet ids. This is the issue-#1
+	 * regression guard: DataSet.update() is an upsert, so feeding it an id
+	 * that was filtered out of the graph would re-insert that node as a
+	 * bare { id, size } phantom (no label, no tooltip, no edges).
 	 */
 	private applyHoverSize(): void {
 		if (!this.nodeDS) return;
-		const updates: VisNode[] = [];
-		const focusedId = this.hoverFocus?.nodeId;
-		for (const [id, base] of this.nodeBaseSize) {
-			const want = id === focusedId ? base * 1.3 : base;
-			updates.push({ id, size: want });
-		}
+		const liveIds = this.nodeDS.getIds() as string[];
+		const updates = computeHoverSizeUpdates(
+			this.nodeBaseSize,
+			liveIds,
+			this.hoverFocus?.nodeId,
+		);
 		if (updates.length > 0) this.nodeDS.update(updates);
 	}
 
@@ -2606,8 +2613,10 @@ export class CodeGraphView extends ItemView {
 			}
 			if (!pos) return;
 			const scale = this.network.getScale() || 1;
-			const baseSize =
-				this.nodeBaseSize.get(this.hoverFocus.nodeId) ?? 15;
+			const baseSize = focusedBaseSize(
+				this.nodeBaseSize,
+				this.hoverFocus.nodeId,
+			);
 			const pulse = 0.5 + Math.sin(Date.now() / 500) * 0.2;
 			const inner = baseSize * 1.3;
 			const outer = inner + 30 / scale;
@@ -2996,6 +3005,11 @@ export class CodeGraphView extends ItemView {
 		// so connection points distribute around the node perimeter naturally)
 
 		// ── Build vis nodes ──
+		// Rebuild nodeBaseSize from scratch: it must mirror EXACTLY the ids
+		// rendered in this pass. Without the clear, ids filtered out by a
+		// previous render linger in the map; applyHoverSize() would upsert
+		// them back into the DataSet as bare phantom nodes (issue #1).
+		this.nodeBaseSize.clear();
 		const nodes: VisNode[] = [];
 		for (const id of effectiveNodeIds) {
 			if (this.hideIsolated && !incident.has(id)) continue;
