@@ -13,7 +13,8 @@ the indexer — all per-language dispatch flows through here.
 | File | Purpose |
 | ---- | ------- |
 | `types.ts` | `LanguageProfile` interface + `ResolveContext`. The contract. |
-| `_regexRunner.ts` | Shared `runImportRegexes()` helper — the verbatim extraction loop from the retired `importRegex.ts`. Used by every profile whose imports are regex-driven. |
+| `_regexRunner.ts` | Shared `runImportRegexes()` helper. It filters matches that begin inside language-specific comments or string literals before collecting import edges. |
+| `_sourceMask.ts` | Language-specific lexical comment and string handling used by the shared regex runner. Add syntax here when registering a regex-backed profile. |
 | `javascript.ts` | JS family profiles (typescript, tsx, javascript). Share import syntax, resolution, and the tree-sitter extractor. |
 | `python.ts` | Python profile. Distinct import syntax + dotted-module resolution + its own extractor. |
 | `imports-only.ts` | Imports-only profiles: css, c, cpp, go, rust, java, lua, php. These extract `imports` edges via regex but do NOT extract `calls`/`inherits`. |
@@ -52,12 +53,14 @@ interface LanguageProfile {
      grammar: 'tree-sitter-kotlin.wasm',
      hasSymbolExtraction: false,        // bump to true once you write extractSymbols
      usesTsConfig: false,
-     extractImports: (content) => runImportRegexes(content, KT_REGEXES),
+     extractImports: (content) => runImportRegexes(content, KT_REGEXES, 'kotlin'),
      resolveImport: resolveAsRelative,
    };
    ```
 
-3. **Register it** in `registry.ts`:
+3. **Register its lexical syntax** in `_sourceMask.ts`. Include that language's line comments, block comments, and string delimiters so commented-out imports do not become graph edges and comment-like text inside strings is preserved.
+
+4. **Register it** in `registry.ts`:
    ```ts
    export const PROFILES = {
      ...,
@@ -65,10 +68,10 @@ interface LanguageProfile {
    };
    ```
 
-4. **Add the extension** to `DEFAULT_SETTINGS.codeExtensions` in `src/settings.ts`
+5. **Add the extension** to `DEFAULT_SETTINGS.codeExtensions` in `src/settings.ts`
    if it isn't already covered.
 
-5. **(Optional) Ship the grammar wasm.** Drop `tree-sitter-kotlin.wasm` into
+6. **(Optional) Ship the grammar wasm.** Drop `tree-sitter-kotlin.wasm` into
    `node_modules/@repomix/tree-sitter-wasms/out/` so `esbuild.config.mjs`'s
    `copyWasmAssets()` picks it up on the next build. The grammar must also be
    listed in `LANG_TO_GRAMMAR` — but that's **derived** from `profile.grammar`,

@@ -26,7 +26,7 @@ export const PYTHON_PROFILE: LanguageProfile = {
 	grammar: 'tree-sitter-python.wasm',
 	hasSymbolExtraction: true,
 	usesTsConfig: false,
-	extractImports: (content: string) => runImportRegexes(content, PY_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, PY_REGEXES, 'python'),
 	resolveImport: resolvePy,
 	extractSymbols: extractPython,
 };

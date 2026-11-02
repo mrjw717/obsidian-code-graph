@@ -60,7 +60,7 @@ function resolveJsFamily(ctx: ResolveContext): string | null {
 const JS_FAMILY = {
 	hasSymbolExtraction: true,
 	usesTsConfig: true,
-	extractImports: (content: string) => runImportRegexes(content, JS_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, JS_REGEXES, 'javascript'),
 	resolveImport: resolveJsFamily,
 	extractSymbols: extractTypeScript,
 } satisfies Omit<LanguageProfile, 'id' | 'extensions' | 'grammar'>;

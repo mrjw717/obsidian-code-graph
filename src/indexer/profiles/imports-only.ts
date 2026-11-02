@@ -73,7 +73,7 @@ export const CSS_PROFILE: LanguageProfile = {
 	id: 'css',
 	extensions: ['css'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, CSS_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, CSS_REGEXES, 'css'),
 	resolveImport: resolveAsRelative,
 };
 
@@ -81,7 +81,7 @@ export const C_PROFILE: LanguageProfile = {
 	id: 'c',
 	extensions: ['c', 'h'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, C_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, C_REGEXES, 'c'),
 	resolveImport: resolveAsCInclude,
 };
 
@@ -89,7 +89,7 @@ export const CPP_PROFILE: LanguageProfile = {
 	id: 'cpp',
 	extensions: ['cpp', 'cc', 'cxx', 'hpp'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, CPP_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, CPP_REGEXES, 'cpp'),
 	resolveImport: resolveAsCInclude,
 };
 
@@ -97,7 +97,7 @@ export const GO_PROFILE: LanguageProfile = {
 	id: 'go',
 	extensions: ['go'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, GO_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, GO_REGEXES, 'go'),
 	resolveImport: resolveAsRelative,
 };
 
@@ -105,7 +105,7 @@ export const RUST_PROFILE: LanguageProfile = {
 	id: 'rust',
 	extensions: ['rs'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, RUST_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, RUST_REGEXES, 'rust'),
 	resolveImport: resolveAsRelative,
 };
 
@@ -113,7 +113,7 @@ export const JAVA_PROFILE: LanguageProfile = {
 	id: 'java',
 	extensions: ['java'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, JAVA_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, JAVA_REGEXES, 'java'),
 	resolveImport: resolveAsRelative,
 };
 
@@ -121,7 +121,7 @@ export const LUA_PROFILE: LanguageProfile = {
 	id: 'lua',
 	extensions: ['lua'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, LUA_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, LUA_REGEXES, 'lua'),
 	resolveImport: resolveAsRelative,
 };
 
@@ -129,6 +129,6 @@ export const PHP_PROFILE: LanguageProfile = {
 	id: 'php',
 	extensions: ['php'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, PHP_REGEXES),
+	extractImports: (content: string) => runImportRegexes(content, PHP_REGEXES, 'php'),
 	resolveImport: resolveAsRelative,
 };

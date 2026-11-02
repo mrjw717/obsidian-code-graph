@@ -82,7 +82,16 @@ export function resolvePythonImport(
 		const modPath = rest.replace(/\./g, '/');
 		base = modPath ? normalizePosix(posixJoin(dir, modPath)) : dir;
 	} else {
-		base = specifier.replace(/\./g, '/');
+		const modulePath = specifier.replace(/\./g, '/');
+		const siblingBase = normalizePosix(posixJoin(posixDir(importerPath), modulePath));
+		const rootBase = normalizePosix(modulePath);
+		const bases = siblingBase === rootBase ? [siblingBase] : [siblingBase, rootBase];
+		for (const candidateBase of bases) {
+			for (const candidate of [`${candidateBase}.py`, `${candidateBase}/__init__.py`]) {
+				if (knownPaths.has(candidate)) return candidate;
+			}
+		}
+		return null;
 	}
 	const candidates = [`${base}.py`, `${base}/__init__.py`];
 	for (const c of candidates) {
