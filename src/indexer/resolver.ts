@@ -261,7 +261,7 @@ export function findContainingSymbol(
 	let best: SymbolDef | null = null;
 	for (const def of defs) {
 		if (def.line > line) continue;
-		if (def.endLine && line > def.endLine) continue;
+		if (def.endLine === undefined || line > def.endLine) continue;
 		// Tightest enclosing scope = latest start line that's ≤ target.
 		if (!best || def.line > best.line) {
 			best = def;
@@ -296,8 +296,9 @@ export function resolveLinkTarget(
 	// Name index lookup — handles basenames AND multi-segment path suffixes
 	const arr = nameIndex.get(target);
 	if (arr && arr.length > 0) {
-		const md = arr.find((p) => p.endsWith('.md'));
-		const first = arr[0];
+		const sorted = [...arr].sort();
+		const md = sorted.find((p) => p.endsWith('.md'));
+		const first = sorted[0];
 		return md ?? first ?? null;
 	}
 	return null;

@@ -40,4 +40,12 @@ export default defineConfig(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		// Node test environment: no Obsidian window; globalThis/global references
+		// in tests are intentional (fake-timer DomEvent stubs), not plugin code.
+		files: ['tests/**/*.ts'],
+		rules: {
+			'obsidianmd/no-global-this': 'off',
+		},
+	},
 );

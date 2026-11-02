@@ -154,7 +154,10 @@ function ensureCore(): Promise<void> {
 			wasmBinary,
 			locateFile: (file: string) => adapter.getResourcePath(`${root}/${file}`),
 		});
-	})();
+	})().catch((error: unknown) => {
+		corePromise = null;
+		throw error;
+	});
 	return corePromise;
 }
 
@@ -209,6 +212,10 @@ export async function parseSource(
 	const language = await loadLanguage(lang);
 	if (!language) return null;
 	const parser = new Parser();
-	parser.setLanguage(language);
-	return parser.parse(source);
+	try {
+		parser.setLanguage(language);
+		return parser.parse(source);
+	} finally {
+		parser.delete();
+	}
 }

@@ -169,8 +169,11 @@ export class CodeIndexer {
 				try {
 					const tree = await parseSource(lang, content);
 					if (tree) {
-						symbols = profile.extractSymbols(tree);
-						tree.delete();
+						try {
+							symbols = profile.extractSymbols(tree);
+						} finally {
+							tree.delete();
+						}
 						parsedCount++;
 					} else {
 						parseFailures.push(

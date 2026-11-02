@@ -27,6 +27,7 @@ export default class CodeGraphPlugin extends Plugin {
 	private indexer!: CodeIndexer;
 	private extract: ExtractResult | null = null;
 	private reindexTimer: number | null = null;
+	private unloaded = false;
 
 	async onload() {
 		await this.loadSettings();
@@ -86,6 +87,12 @@ export default class CodeGraphPlugin extends Plugin {
 		this.registerEvent(
 			this.app.metadataCache.on('changed', () => this.scheduleRemerge()),
 		);
+	}
+
+	onunload(): void {
+		this.unloaded = true;
+		if (this.reindexTimer !== null) window.clearTimeout(this.reindexTimer);
+		this.reindexTimer = null;
 	}
 
 	async activateView(): Promise<void> {
@@ -159,13 +166,15 @@ export default class CodeGraphPlugin extends Plugin {
 	private scheduleReindex(): void {
 		if (this.reindexTimer !== null) window.clearTimeout(this.reindexTimer);
 		this.reindexTimer = window.setTimeout(() => {
+			this.reindexTimer = null;
 			void this.reindex();
 		}, 700);
 	}
 
 	private scheduleRemerge(): void {
-		if (this.reindexTimer !== null) window.clearTimeout(this.reindexTimer);
+		if (this.reindexTimer !== null) return;
 		this.reindexTimer = window.setTimeout(() => {
+			this.reindexTimer = null;
 			this.rebuildModel();
 		}, 300);
 	}
@@ -173,7 +182,9 @@ export default class CodeGraphPlugin extends Plugin {
 	/** Full re-parse of all code files + re-merge of markdown links. */
 	async reindex(): Promise<void> {
 		try {
-			this.extract = await this.indexer.extract();
+			const extract = await this.indexer.extract();
+			if (this.unloaded) return;
+			this.extract = extract;
 			this.rebuildModel();
 			const model = this.graphModel;
 			const s = model?.stats;
@@ -240,6 +251,7 @@ export default class CodeGraphPlugin extends Plugin {
 				8000,
 			);
 		} catch (err) {
+			if (this.unloaded) return;
 			console.error('[code-graph] reindex failed', err);
 			new Notice('Code graph: reindex failed (see console)');
 		}
@@ -282,17 +294,9 @@ export default class CodeGraphPlugin extends Plugin {
 			...DEFAULT_SETTINGS.edgeTypesEnabled,
 			...(saved?.edgeTypesEnabled ?? {}),
 		};
-		// When defaults change (version bump), re-seed list-shaped settings so
-		// existing users pick up new entries instead of keeping stale short lists.
-		// edgeTypesEnabled is also reset because earlier dev builds persisted
-		// { calls: false, inherits: false, ... } which silently hid every
-		// non-import edge. The deep-merge above preserves user choices — but
-		// these were never user choices, they were stale dev defaults.
+		// Preserve saved choices across settings migrations.
 		if (!saved || saved.settingsVersion !== CURRENT_SETTINGS_VERSION) {
 			this.settings.settingsVersion = CURRENT_SETTINGS_VERSION;
-			this.settings.excludeFolders = DEFAULT_SETTINGS.excludeFolders;
-			this.settings.codeExtensions = DEFAULT_SETTINGS.codeExtensions;
-			this.settings.edgeTypesEnabled = { ...DEFAULT_SETTINGS.edgeTypesEnabled };
 			// v9 migration: clear calculator-specific colorGroups that were
 			// shipped as defaults in v8. Users who defined their own groups
 			// (different from the old 4 calculator entries) keep them.

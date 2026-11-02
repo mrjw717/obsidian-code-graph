@@ -370,6 +370,11 @@ export class CodeGraphView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		if (this.renderTimer !== null) {
+			window.clearTimeout(this.renderTimer);
+			this.renderTimer = null;
+		}
+		this.canvasEl = null;
 		this.destroyNetwork();
 	}
 
@@ -406,6 +411,8 @@ export class CodeGraphView extends ItemView {
 			this.hoverDebounceTimer = null;
 		}
 		this.hoverFocus = null;
+		this.currentNodeOpacity.clear();
+		this.currentEdgeOpacity.clear();
 		
 		if (this.network) {
 			this.network.destroy();
