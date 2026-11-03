@@ -179,6 +179,17 @@ describe('imports-only families: module-path languages', () => {
 		}))).toBe('src/widgets/Spinner.java');
 	});
 
+	it('java: resolves static-member imports by their class segment', () => {
+		const java = getProfile('java');
+		if (!java) throw new Error('Java profile is not registered');
+
+		expect(java.resolveImport(ctx({
+			importerPath: 'src/boot.java',
+			specifier: 't5.java.utilx.T5Ids.next',
+			knownPaths: new Set(['src/boot.java', 'src/utilx/T5Ids.java']),
+		}))).toBe('src/utilx/T5Ids.java');
+	});
+
 	it('lua: resolves dotted requires against package.path roots', () => {
 		const lua = getProfile('lua');
 		if (!lua) throw new Error('Lua profile is not registered');

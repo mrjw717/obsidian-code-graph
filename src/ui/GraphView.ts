@@ -27,6 +27,7 @@ import {
 	communityColor,
 	matchesColorGroup,
 } from '../types';
+import { isDeadNode } from '../graph/deadCode';
 
 /** Convert any color string (hex or hsl) to rgba with given alpha. */
 function colorToRgba(color: string, alpha: number): string {
@@ -1572,6 +1573,16 @@ export class CodeGraphView extends ItemView {
 				this.updateVisible();
 			},
 		});
+		// Zone auras draw nothing in their default source mode ('groups') until
+		// the user defines a color group — previously a silent no-op that read
+		// as broken. Surface the state in the panel.
+		if (s.showZones && s.zoneColorMode === 'groups' && !s.colorGroups.some((g) => g.enabled)) {
+			const auraHint = parent.createSpan({
+				cls: 'code-graph-hint',
+				text: 'Aura source is Groups, but no color groups are enabled. Use the Auras selector (Sizing section) → Auto to color zones by detected community, or add a color group.',
+			});
+			auraHint.style.padding = '2px 6px';
+		}
 		this.renderNodeLegendRow(parent, {
 			label: 'Highlight dead code',
 			color: '#ef4444',
@@ -1579,7 +1590,7 @@ export class CodeGraphView extends ItemView {
 			size: 10,
 			isOn: s.highlightDeadCode,
 			title:
-				'Files with zero incoming edges get a red ring — likely entry points or dead code.',
+				'Orphaned nodes (zero incoming AND zero outgoing edges) get a red ring — genuinely unused. Entry-point files that reach out to imports are not flagged; symbols inherit their file\'s state.',
 			onToggle: () => {
 				s.highlightDeadCode = !s.highlightDeadCode;
 				void this.plugin.saveSettings();
@@ -3022,10 +3033,7 @@ export class CodeGraphView extends ItemView {
 			if (this.hideIsolated && !incident.has(id)) continue;
 			const n = model.nodes[id];
 			if (!n) continue;
-			const isDead =
-				s.highlightDeadCode &&
-				(fanIn.get(id) ?? 0) === 0 &&
-				n.kind !== 'note';
+			const isDead = s.highlightDeadCode && isDeadNode(n, fanIn, fanOut);
 			const isSym = isSymbolKind(n.kind);
 			const sz = isSym
 				? Math.max(5, sizeFor(n) * 0.6)

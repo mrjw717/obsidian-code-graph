@@ -148,6 +148,7 @@ export function resolveByUniqueNameSuffix(
 	exts: string[],
 	knownPaths: Set<string>,
 	importerPath: string,
+	extraSuffixes: string[] = [],
 ): string | null {
 	let trimmed = modulePath.replace(/\/+$/, '');
 	if (!trimmed) return null;
@@ -160,8 +161,10 @@ export function resolveByUniqueNameSuffix(
 	}
 	if (!trimmed || trimmed === '.' || trimmed === '..') return null;
 	const last = trimmed.split('/').pop() ?? '';
-	// Try the full path first, then the bare final segment.
-	const suffixes = last && last !== trimmed ? [trimmed, last] : [trimmed];
+	// Try the full path first, then extra suffixes supplied by the caller
+	// (e.g. a Java static import's class segment), then the bare final segment.
+	const suffixes = [trimmed, ...extraSuffixes];
+	if (last && last !== trimmed) suffixes.push(last);
 	for (const suffix of suffixes) {
 		let match: string | null = null;
 		for (const p of knownPaths) {

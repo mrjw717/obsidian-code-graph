@@ -55,6 +55,23 @@ function resolveAsModulePathFor(exts: string[], separator: RegExp | null = null)
 	};
 }
 
+/**
+ * Java: directory probing cannot see classpath roots, so fall back to the
+ * index. `import static pkg.Class.member` ends with the MEMBER name — the
+ * class name is the second-to-last dotted segment, so when the last segment
+ * is member-like (lowercase-initial after an uppercase-initial class), try
+ * the class segment before the bare member name.
+ */
+function resolveJavaModulePath(ctx: ResolveContext): string | null {
+	const base = resolveAsRelative(ctx);
+	if (base) return base;
+	const parts = ctx.specifier.split('.');
+	const extraSuffixes: string[] = [];
+	const isMember = parts.length >= 2 && /^[a-z]/.test(parts[parts.length - 1] ?? '') && /^[A-Z]/.test(parts[parts.length - 2] ?? '');
+	if (isMember) extraSuffixes.push(parts[parts.length - 2] ?? '');
+	return resolveByUniqueNameSuffix(ctx.specifier.replace(/\./g, '/'), JAVA_EXTS, ctx.knownPaths, ctx.importerPath, extraSuffixes);
+}
+
 const CSS_REGEXES: RegExp[] = [
 	/@import\s+(?:url\s*\(\s*)?['"](?<spec>[^'"]+)['"]/g,
 ];
@@ -162,7 +179,7 @@ export const JAVA_PROFILE: LanguageProfile = {
 	extensions: ['java'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, JAVA_REGEXES, 'java'),
-	resolveImport: resolveAsModulePathFor(JAVA_EXTS, /\./g),
+	resolveImport: resolveJavaModulePath,
 };
 
 export const LUA_PROFILE: LanguageProfile = {

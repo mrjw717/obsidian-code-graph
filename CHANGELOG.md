@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Dead-code highlight hardened against false positives (issue #5).** The red
+  ring now means "true orphan": a node with zero incoming AND zero outgoing
+  edges. Previously zero fan-in alone flagged every entry point (CLI scripts,
+  `main.*`, top-level stylesheets — files that run constantly) as dead, and
+  symbols flagged while their containing file was plainly reachable. Symbols
+  now inherit their file's deadness (extracted into `src/graph/deadCode.ts`
+  with unit tests). Entry-point functions (`mount`, `run`) no longer flagged.
+- **Zone auras explained instead of silently empty (issue #5).** The default
+  aura source ("Groups") draws nothing until a color group is enabled — the
+  panel now shows an explanatory hint in the Display section; verified that
+  switching the aura source to Auto renders community halos.
+- Java static-member imports (`import static pkg.Class.member`) now resolve
+  by their class segment (previously the member name was tried and missed).
+
+### Fixed
+
 - Imports from modules living under roots invisible to static analysis now resolve
   through a conservative file-index fallback (unique name match only; ambiguous
   names stay unresolved, per the issue #4 design). Applied across all language
