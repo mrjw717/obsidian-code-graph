@@ -91,7 +91,10 @@ export function resolvePythonImport(
 				if (knownPaths.has(candidate)) return candidate;
 			}
 		}
-		return null;
+		// Modules added to `sys.path` at runtime live outside the importer's
+		// folder and the vault root, so the probes above miss them. Fall back
+		// to the file index and connect only when exactly one file matches.
+		return resolvePythonByIndex(importerPath, specifier, knownPaths);
 	}
 	const candidates = [`${base}.py`, `${base}/__init__.py`];
 	for (const c of candidates) {
@@ -101,20 +104,98 @@ export function resolvePythonImport(
 }
 
 /**
+ * Fallback for Python specifiers that directory probing could not resolve
+ * (e.g. a directory appended to `sys.path` at runtime). Matches the module
+ * against the indexed file list by path suffix and returns a path only when
+ * exactly one Python file matches, so ambiguous module names stay unresolved.
+ */
+export function resolvePythonByIndex(
+	importerPath: string,
+	specifier: string,
+	knownPaths: Set<string>,
+): string | null {
+	return resolveByUniqueNameSuffix(
+		specifier.replace(/\./g, '/'),
+		['py'],
+		knownPaths,
+		importerPath,
+	);
+}
+
+/** Strip `/__init__.<ext>` (Python package style) or a plain extension. */
+function moduleBase(p: string, exts: string[]): string | null {
+	for (const ext of exts) {
+		const init = `/__init__.${ext}`;
+		if (p.endsWith(init)) return p.slice(0, -init.length);
+	}
+	for (const ext of exts) {
+		const plain = `.${ext}`;
+		if (p.endsWith(plain)) return p.slice(0, -plain.length);
+	}
+	return null;
+}
+
+/**
+ * Shared fallback for specifiers whose real resolution root is invisible to
+ * static analysis (`sys.path`, `-I` include dirs, crate roots, bundler/vendor
+ * paths). Matches the module against the file index by path suffix and returns
+ * a path only when exactly one indexed file matches, so ambiguous module names
+ * stay unresolved. `modulePath` uses '/' separators; a trailing extension in
+ * `exts` is ignored so specifiers like `header.h` still match `header` files.
+ */
+export function resolveByUniqueNameSuffix(
+	modulePath: string,
+	exts: string[],
+	knownPaths: Set<string>,
+	importerPath: string,
+): string | null {
+	let trimmed = modulePath.replace(/\/+$/, '');
+	if (!trimmed) return null;
+	for (const ext of exts) {
+		const suffix = `.${ext}`;
+		if (trimmed.endsWith(suffix)) {
+			trimmed = trimmed.slice(0, -suffix.length);
+			break;
+		}
+	}
+	if (!trimmed || trimmed === '.' || trimmed === '..') return null;
+	const last = trimmed.split('/').pop() ?? '';
+	// Try the full path first, then the bare final segment.
+	const suffixes = last && last !== trimmed ? [trimmed, last] : [trimmed];
+	for (const suffix of suffixes) {
+		let match: string | null = null;
+		for (const p of knownPaths) {
+			if (p === importerPath) continue;
+			const base = moduleBase(p, exts);
+			if (!base) continue;
+			if (base !== suffix && !base.endsWith(`/${suffix}`)) continue;
+			if (match) return null; // ambiguous — leave the import unresolved
+			match = p;
+		}
+		if (match) return match;
+	}
+	return null;
+}
+
+/**
  * Resolve a C/C++ include specifier against the importing file's dir first,
- * then as a vault-relative path (common -I root resolution).
+ * then as a vault-relative path (common -I root resolution). When `exts` is
+ * non-empty, an index fallback covers headers reachable only through other
+ * -I roots (e.g. a sibling `include/` directory not probed directly).
  */
 export function resolveCInclude(
 	importerPath: string,
 	specifier: string,
 	knownPaths: Set<string>,
+	exts: string[] = [],
 ): string | null {
 	const fromDir = normalizePosix(posixJoin(posixDir(importerPath), specifier));
 	const candidates = [fromDir, specifier];
 	for (const c of candidates) {
 		if (knownPaths.has(c)) return c;
 	}
-	return null;
+	if (exts.length === 0) return null;
+	return resolveByUniqueNameSuffix(specifier, exts, knownPaths, importerPath);
 }
 
 /** Map symbol name -> set of files that define it (project-wide symbol table). */

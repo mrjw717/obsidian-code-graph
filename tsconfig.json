@@ -15,5 +15,6 @@
 		"allowSyntheticDefaultImports": true,
 		"lib": ["ES2021", "DOM"]
 	},
-	"include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+	"include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"],
+	"exclude": ["tests/Code Graph Issue Test", "tests/evidence"]
 }

@@ -8,7 +8,7 @@
 import type { LanguageProfile, ResolveContext } from './types';
 import { extractTypeScript } from '../languages/typescript';
 import { resolveAliased } from '../tsconfig';
-import { resolveJsImport } from '../resolver';
+import { resolveJsImport, resolveByUniqueNameSuffix } from '../resolver';
 import { runImportRegexes } from './_regexRunner';
 
 // JS/TS family shares import syntax. Order matters: the plain `import … from`
@@ -33,10 +33,15 @@ function isRelativeSpecifier(spec: string): boolean {
 	return spec.startsWith('./') || spec.startsWith('../') || spec === '.' || spec === '..';
 }
 
+// Bundlers and Node resolve bare specifiers against roots we cannot see
+// statically (package roots, vendored node_modules, webpack `resolve.modules`).
+const JS_FAMILY_EXTS = ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'];
+
 /**
  * JS/TS resolution: try relative-path resolution first (resolveJsImport), then
- * fall back to tsconfig path-alias resolution (resolveAliased). The tsconfig is
- * passed in via the context — the indexer fetches it once per file.
+ * fall back to tsconfig path-alias resolution (resolveAliased). Finally fall
+ * back to a unique-name index match for bare specifiers whose real root is
+ * invisible to static analysis (mirrors the Python `sys.path` fallback).
  */
 function resolveJsFamily(ctx: ResolveContext): string | null {
 	const relative = isRelativeSpecifier(ctx.specifier)
@@ -48,11 +53,19 @@ function resolveJsFamily(ctx: ResolveContext): string | null {
 		  )
 		: null;
 	if (relative) return relative;
-	return resolveAliased(
+	const aliased = resolveAliased(
 		ctx.specifier,
 		ctx.tsConfig,
 		ctx.candidateExts,
 		ctx.knownPaths,
+	);
+	if (aliased) return aliased;
+	if (isRelativeSpecifier(ctx.specifier)) return null;
+	return resolveByUniqueNameSuffix(
+		ctx.specifier,
+		JS_FAMILY_EXTS,
+		ctx.knownPaths,
+		ctx.importerPath,
 	);
 }
 

@@ -58,6 +58,94 @@ describe('GitHub Python import issue reproductions', () => {
 
 		expect(resolved).toBe('Test 2/pkg/tools/__init__.py');
 	});
+
+	it('issue #4: resolves a module in a sibling folder via the index fallback', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Issue 4/Alpha/alpha.py',
+			specifier: 'beta',
+			candidateExts: ['py'],
+			knownPaths: new Set(['Issue 4/Alpha/alpha.py', 'Issue 4/Beta/beta.py']),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBe('Issue 4/Beta/beta.py');
+	});
+
+	it('issue #4: resolves a via-sys.path package by its __init__.py', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Issue 4/Alpha/alpha.py',
+			specifier: 'pkg',
+			candidateExts: ['py'],
+			knownPaths: new Set(['Issue 4/Alpha/alpha.py', 'Issue 4/Beta/pkg/__init__.py']),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBe('Issue 4/Beta/pkg/__init__.py');
+	});
+
+	it('issue #4: leaves ambiguous module names unresolved', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Issue 4/Alpha/alpha.py',
+			specifier: 'beta',
+			candidateExts: ['py'],
+			knownPaths: new Set([
+				'Issue 4/Alpha/alpha.py',
+				'Issue 4/Beta/beta.py',
+				'Issue 4/Gamma/beta.py',
+			]),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBeNull();
+	});
+
+	it('issue #4: keeps returning null when no indexed file matches', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Issue 4/Alpha/alpha.py',
+			specifier: 'missing',
+			candidateExts: ['py'],
+			knownPaths: new Set(['Issue 4/Alpha/alpha.py']),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBeNull();
+	});
+
+	it('issue #4: ignores non-Python files with the same module name', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Issue 4/Alpha/alpha.py',
+			specifier: 'beta',
+			candidateExts: ['py'],
+			knownPaths: new Set(['Issue 4/Alpha/alpha.py', 'Issue 4/Beta/beta.md']),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBeNull();
+	});
+
+	it('issue #4: prefers the full dotted path over a bare final-segment match', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Test 2/alpha.py',
+			specifier: 'pkg.tools',
+			candidateExts: ['py'],
+			knownPaths: new Set(['Test 2/alpha.py', 'Shared/pkg/tools.py', 'Other/tools.py']),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBe('Shared/pkg/tools.py');
+	});
+
+	it('issue #4: falls back to the final module segment for dotted imports', () => {
+		const resolved = python.resolveImport({
+			importerPath: 'Issue 4/Alpha/alpha.py',
+			specifier: 'pkg.missing',
+			candidateExts: ['py'],
+			knownPaths: new Set(['Issue 4/Alpha/alpha.py', 'Issue 4/Beta/missing.py']),
+			tsConfig: null,
+		});
+
+		expect(resolved).toBe('Issue 4/Beta/missing.py');
+	});
 });
 
 const commentedImportProbes: Array<{ profileId: string; source: string }> = [

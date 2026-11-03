@@ -10,7 +10,8 @@
  * indexer will start parsing. See `languages/typescript.ts` for the pattern.
  */
 import type { LanguageProfile, ResolveContext } from './types';
-import { resolveCInclude, resolveJsImport } from '../resolver';
+import type { ImportSpec } from '../extractor';
+import { resolveCInclude, resolveJsImport, resolveByUniqueNameSuffix } from '../resolver';
 import { runImportRegexes } from './_regexRunner';
 
 function resolveAsRelative(ctx: ResolveContext): string | null {
@@ -22,8 +23,36 @@ function resolveAsRelative(ctx: ResolveContext): string | null {
 	);
 }
 
-function resolveAsCInclude(ctx: ResolveContext): string | null {
-	return resolveCInclude(ctx.importerPath, ctx.specifier, ctx.knownPaths);
+function resolveAsCIncludeFor(exts: string[]) {
+	return (ctx: ResolveContext): string | null =>
+		resolveCInclude(ctx.importerPath, ctx.specifier, ctx.knownPaths, exts);
+}
+
+const GO_EXTS = ['go'];
+const RUST_EXTS = ['rs'];
+const JAVA_EXTS = ['java'];
+const LUA_EXTS = ['lua'];
+const PHP_EXTS = ['php'];
+const CSS_EXTS = ['css'];
+
+/**
+ * These languages express imports as module paths whose actual roots
+ * (Go modules, crate roots, Java classpath, Lua package.path, PHP include
+ * path, CSS web roots) are invisible to static analysis. Directory probing
+ * fails for everything outside the importer's folder, so fall back to a
+ * unique-name match against the file index.
+ */
+function resolveAsModulePathFor(exts: string[], separator: RegExp | null = null) {
+	return (ctx: ResolveContext): string | null => {
+		const base = resolveAsRelative(ctx);
+		if (base) return base;
+		return resolveByUniqueNameSuffix(
+			separator ? ctx.specifier.replace(separator, '/') : ctx.specifier,
+			exts,
+			ctx.knownPaths,
+			ctx.importerPath,
+		);
+	};
 }
 
 const CSS_REGEXES: RegExp[] = [
@@ -44,6 +73,25 @@ const GO_REGEXES: RegExp[] = [
 	/import\s+"(?<spec>[^"]+)"/g,
 	/import\s+\w+\s+"(?<spec>[^"]+)"/g,
 ];
+
+/** Go: extract both inline and grouped (parenthesized) import declarations. */
+function extractGoImports(content: string): ImportSpec[] {
+	const specs = runImportRegexes(content, GO_REGEXES, 'go');
+	const out = [...specs];
+	const blockRe = /import\s*\(([^)]*)\)/g;
+	let m: RegExpExecArray | null;
+	while ((m = blockRe.exec(content)) !== null) {
+		// Per-entry lines: matchAll offsets are relative to the block body, so
+		// re-anchor them into the full document.
+		const blockStart = m.index + m[0].indexOf(m[1] ?? '');
+		for (const quote of m[1]?.matchAll(/"([^"]+)"/g) ?? []) {
+			if (!quote[1]) continue;
+			const line = content.slice(0, blockStart + (quote.index ?? 0)).split('\n').length;
+			out.push({ specifier: quote[1], names: [], line });
+		}
+	}
+	return out;
+}
 
 const RUST_REGEXES: RegExp[] = [
 	/use\s+(?<spec>[\w:]+(?:::\{[^}]*\})?)\s*;/g,
@@ -74,7 +122,7 @@ export const CSS_PROFILE: LanguageProfile = {
 	extensions: ['css'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, CSS_REGEXES, 'css'),
-	resolveImport: resolveAsRelative,
+	resolveImport: resolveAsModulePathFor(CSS_EXTS),
 };
 
 export const C_PROFILE: LanguageProfile = {
@@ -82,7 +130,7 @@ export const C_PROFILE: LanguageProfile = {
 	extensions: ['c', 'h'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, C_REGEXES, 'c'),
-	resolveImport: resolveAsCInclude,
+	resolveImport: resolveAsCIncludeFor(['c', 'h']),
 };
 
 export const CPP_PROFILE: LanguageProfile = {
@@ -90,15 +138,15 @@ export const CPP_PROFILE: LanguageProfile = {
 	extensions: ['cpp', 'cc', 'cxx', 'hpp'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, CPP_REGEXES, 'cpp'),
-	resolveImport: resolveAsCInclude,
+	resolveImport: resolveAsCIncludeFor(['cpp', 'cc', 'cxx', 'hpp', 'c', 'h']),
 };
 
 export const GO_PROFILE: LanguageProfile = {
 	id: 'go',
 	extensions: ['go'],
 	...IMPORTS_ONLY,
-	extractImports: (content: string) => runImportRegexes(content, GO_REGEXES, 'go'),
-	resolveImport: resolveAsRelative,
+	extractImports: extractGoImports,
+	resolveImport: resolveAsModulePathFor(GO_EXTS),
 };
 
 export const RUST_PROFILE: LanguageProfile = {
@@ -106,7 +154,7 @@ export const RUST_PROFILE: LanguageProfile = {
 	extensions: ['rs'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, RUST_REGEXES, 'rust'),
-	resolveImport: resolveAsRelative,
+	resolveImport: resolveAsModulePathFor(RUST_EXTS, /::/g),
 };
 
 export const JAVA_PROFILE: LanguageProfile = {
@@ -114,7 +162,7 @@ export const JAVA_PROFILE: LanguageProfile = {
 	extensions: ['java'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, JAVA_REGEXES, 'java'),
-	resolveImport: resolveAsRelative,
+	resolveImport: resolveAsModulePathFor(JAVA_EXTS, /\./g),
 };
 
 export const LUA_PROFILE: LanguageProfile = {
@@ -122,7 +170,7 @@ export const LUA_PROFILE: LanguageProfile = {
 	extensions: ['lua'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, LUA_REGEXES, 'lua'),
-	resolveImport: resolveAsRelative,
+	resolveImport: resolveAsModulePathFor(LUA_EXTS, /\./g),
 };
 
 export const PHP_PROFILE: LanguageProfile = {
@@ -130,5 +178,5 @@ export const PHP_PROFILE: LanguageProfile = {
 	extensions: ['php'],
 	...IMPORTS_ONLY,
 	extractImports: (content: string) => runImportRegexes(content, PHP_REGEXES, 'php'),
-	resolveImport: resolveAsRelative,
+	resolveImport: resolveAsModulePathFor(PHP_EXTS, /[\\]/g),
 };
