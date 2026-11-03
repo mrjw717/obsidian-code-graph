@@ -26,3 +26,20 @@ export function isDeadNode(node: GraphNode, fanIn: FanMap, fanOut: FanMap): bool
 	const hasOutgoing = (fanOut.get(filePath) ?? 0) > 0;
 	return !hasIncoming && !hasOutgoing;
 }
+
+/**
+ * File-level dead list for the panel's "Dead code (N)" navigator. Code files
+ * only — symbols inherit their file's state and follow via their file entry.
+ * Sorted for a stable list across rebuilds.
+ */
+export function collectDeadFileIds(
+	nodes: Record<string, GraphNode>,
+	fanIn: FanMap,
+	fanOut: FanMap,
+): string[] {
+	const dead: string[] = [];
+	for (const node of Object.values(nodes)) {
+		if (node.kind === 'code' && isDeadNode(node, fanIn, fanOut)) dead.push(node.id);
+	}
+	return dead.sort((a, b) => a.localeCompare(b));
+}

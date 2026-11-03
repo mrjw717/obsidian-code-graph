@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   symbols flagged while their containing file was plainly reachable. Symbols
   now inherit their file's deadness (extracted into `src/graph/deadCode.ts`
   with unit tests). Entry-point functions (`mount`, `run`) no longer flagged.
+- **Dead code is now actually findable (issue #5).** Three changes: (1) a
+  zoom-independent red halo is drawn behind orphaned nodes in the
+  `beforeDrawing` canvas hook — the node `shadow` was scale-projected by
+  vis-network and vanished at fit zoom; (2) a "Dead code (N)" panel section
+  lists orphaned files, clicking one zooms the canvas to it; (3) the
+  isolated-node ring placement ran after the camera fit and used the average
+  centroid as its center, flinging orphans up to thousands of px off-screen —
+  the ring is now centered on the graph's bounding box and the camera
+  re-fits after placement, so all orphans render in-frame.
 - **Zone auras explained instead of silently empty (issue #5).** The default
   aura source ("Groups") draws nothing until a color group is enabled — the
   panel now shows an explanatory hint in the Display section; verified that

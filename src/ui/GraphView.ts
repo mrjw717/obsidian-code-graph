@@ -27,7 +27,7 @@ import {
 	communityColor,
 	matchesColorGroup,
 } from '../types';
-import { isDeadNode } from '../graph/deadCode';
+import { collectDeadFileIds, isDeadNode } from '../graph/deadCode';
 
 /** Convert any color string (hex or hsl) to rgba with given alpha. */
 function colorToRgba(color: string, alpha: number): string {
@@ -81,7 +81,7 @@ function nodeStyle(
 
 	// ── Border (dead code or status override) ──
 	let borderColor = isDead ? '#ef4444' : color;
-	let borderWidth = isDead ? 2.5 : 1;
+	let borderWidth = isDead ? 3 : 1;
 	if (colorMode === 'status' && n.status) {
 		borderColor = STATUS_BORDER[n.status] ?? borderColor;
 		borderWidth = STATUS_WIDTH[n.status] ?? borderWidth;
@@ -100,6 +100,10 @@ function nodeStyle(
 		shadow = { enabled: true, color: 'rgba(239,68,68,0.5)', size: 18, x: 0, y: 0 };
 	} else if (n.todoCount && n.todoCount > 0) {
 		shadow = { enabled: true, color: 'rgba(249,115,22,0.4)', size: 15, x: 0, y: 0 };
+	} else if (isDead) {
+		// Dead-code glow up close (zoom-stayed subtle — the fit-zoom-visible
+		// halo is drawn in the beforeDrawing hook at constant screen size).
+		shadow = { enabled: true, color: 'rgba(239,68,68,0.4)', size: 16, x: 0, y: 0 };
 	}
 
 	// ── Label font: dark background + white text ──
@@ -282,6 +286,10 @@ export class CodeGraphView extends ItemView {
 	/** Per-edge displayed opacity (drives the smooth rAF transition). */
 	private currentEdgeOpacity = new Map<string, number>();
 	private opacityRAF: number | null = null;
+	/** Last rendered dead-file set key, to refresh the panel navigator only on change. */
+	private renderedDeadKey: string | null = null;
+	/** Whether the panel navigator's "Dead code" section is expanded. */
+	private deadSectionCollapsed = true;
 	private haloRAF: number | null = null;
 	private hoverDebounceTimer: number | null = null;
 	private contextMenuEl: HTMLElement | null = null;
@@ -306,6 +314,8 @@ export class CodeGraphView extends ItemView {
 		/** Undirected adjacency for hover BFS — cached so computeHopDistances
 		 * doesn't rebuild the 6000-edge map on every hover event. */
 		hoverAdjacency: Map<string, Map<string, number>>;
+		/** Orphaned code-file ids for the "Dead code (N)" panel navigator. */
+		deadFiles: string[];
 	} | null = null;
 	/** True when the graph exceeded maxNodes and auto-degraded perf features. */
 	private degraded = false;
@@ -742,6 +752,41 @@ export class CodeGraphView extends ItemView {
 				this.renderFileTypeSection(container);
 			},
 		);
+
+		// ── Collapsible: Groups (user-defined color groups) ──
+		const deadFiles =
+			this.plugin.settings.highlightDeadCode
+				? this.derivedCache?.deadFiles ?? []
+				: [];
+		if (deadFiles.length > 0) {
+			this.renderSection(
+				body,
+				`Dead code (${deadFiles.length})`,
+				this.deadSectionCollapsed,
+				() => {
+					this.deadSectionCollapsed = !this.deadSectionCollapsed;
+					this.renderPanel();
+				},
+				(container) => {
+					const model = this.plugin.graphModel;
+					for (const id of deadFiles) {
+						const displayName = model?.nodes[id]?.name ?? id;
+						const row = container.createDiv({ cls: 'code-graph-legend-row is-on' });
+						row.title = `${id} — click to zoom to this node`;
+						const preview = row.createDiv({ cls: 'code-graph-node-preview' });
+						preview.style.setProperty('--cg-color', '#ef4444');
+						preview.style.setProperty('--cg-size', '9px');
+						row.createSpan({ cls: 'code-graph-legend-label', text: displayName });
+						row.onclick = () => {
+							this.network?.focus(id, {
+								scale: 1.8,
+								animation: { duration: 400, easingFunction: 'easeInOutQuad' },
+							});
+						};
+					}
+				},
+			);
+		}
 
 		// ── Collapsible: Groups (user-defined color groups) ──
 		this.renderSection(
@@ -2390,6 +2435,33 @@ export class CodeGraphView extends ItemView {
 			if (!ctx) return;
 
 			const s = this.plugin.settings;
+
+			// Dead-code halos: vis shadowBlur is scale-projected by the canvas
+			// transform, so orphans vanished at fit zoom (issue #5). Draw a
+			// screen-space-stable glow behind every dead node here instead.
+			const deadFiles = s.highlightDeadCode ? (this.derivedCache?.deadFiles ?? []) : [];
+			if (deadFiles.length > 0) {
+				const deadScale = this.network?.getScale() ?? 1;
+				const deadRadius = Math.max(20, 26 / deadScale);
+				const deadPositions = this.network?.getPositions();
+				if (deadPositions) {
+					ctx.save();
+					ctx.globalCompositeOperation = 'lighter';
+					for (const id of deadFiles) {
+						const pos = deadPositions[id];
+						if (!pos) continue;
+						const grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, deadRadius);
+						grad.addColorStop(0, 'rgba(239,68,68,0.32)');
+						grad.addColorStop(1, 'rgba(239,68,68,0)');
+						ctx.fillStyle = grad;
+						ctx.beginPath();
+						ctx.arc(pos.x, pos.y, deadRadius, 0, Math.PI * 2);
+						ctx.fill();
+					}
+					ctx.restore();
+				}
+			}
+
 			if (!s.showZones) return;
 
 			// Don't draw auras during initial stabilization — node positions
@@ -2901,6 +2973,7 @@ export class CodeGraphView extends ItemView {
 				maxFo,
 				communityLabels,
 				hoverAdjacency,
+				deadFiles: collectDeadFileIds(model.nodes, fanIn, fanOut),
 			};
 			this.derivedCache = derived;
 		}
@@ -2909,6 +2982,13 @@ export class CodeGraphView extends ItemView {
 		this.cachedFanIn = fanIn;
 		this.cachedFanOut = fanOut;
 		this.cachedCommunityLabels = derived.communityLabels;
+		// Refresh the panel's "Dead code (N)" navigator only when the dead set
+		// actually changed (renderPanel is a full DOM rebuild).
+		const deadKey = derived.deadFiles.join('\u0000');
+		if (this.renderedDeadKey !== deadKey) {
+			this.renderedDeadKey = deadKey;
+			this.renderPanel();
+		}
 		const nodeDegree = (id: string): number =>
 			(fanIn.get(id) ?? 0) + (fanOut.get(id) ?? 0);
 
@@ -3268,21 +3348,27 @@ export class CodeGraphView extends ItemView {
 			.filter((id) => !connectedIds.has(id));
 		if (isolatedIds.length === 0) return;
 
-		// Compute bounding circle of the connected graph
+		// Compute the bounding circle of the connected graph from the bounding
+		// BOX center — an average centroid skews along the graph's long axis,
+		// which inflates maxR and flings the ring far outside the fitted view
+		// (orphaned nodes ended up thousands of px off-screen, issue #5).
 		const positions = this.network.getPositions();
-		let cx = 0, cy = 0, connectedCount = 0;
-		let maxR = 0;
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		let connectedCount = 0;
 		for (const id of Object.keys(positions)) {
 			if (!connectedIds.has(id)) continue;
 			const pos = positions[id];
 			if (!pos) continue;
-			cx += pos.x;
-			cy += pos.y;
 			connectedCount++;
+			minX = Math.min(minX, pos.x);
+			minY = Math.min(minY, pos.y);
+			maxX = Math.max(maxX, pos.x);
+			maxY = Math.max(maxY, pos.y);
 		}
 		if (connectedCount === 0) return;
-		cx /= connectedCount;
-		cy /= connectedCount;
+		const cx = (minX + maxX) / 2;
+		const cy = (minY + maxY) / 2;
+		let maxR = 0;
 		for (const id of Object.keys(positions)) {
 			if (!connectedIds.has(id)) continue;
 			const pos = positions[id];
@@ -3318,6 +3404,11 @@ export class CodeGraphView extends ItemView {
 				// node may have been clustered/removed
 			}
 		}
+		// The ring is placed AFTER the fit ran (stabilization → fit → place),
+		// so the camera must be recomputed to include the fresh ring positions
+		// — otherwise orphans render outside the frame and dead-code and
+		// isolated entries are invisible without a manual re-fit (issue #5).
+		this.network.fit({ animation: false });
 	}
 
 	/** Start the edge animation redraw loop without rebuilding the graph. */

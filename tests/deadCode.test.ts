@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isDeadNode } from '../src/graph/deadCode';
+import { collectDeadFileIds, isDeadNode } from '../src/graph/deadCode';
 import { makeCodeNode, makeNoteNode, makeSymbolNode } from '../src/graph/model';
 
 const fanIn = (entries: Array<[string, number]>): Map<string, number> => new Map(entries);
@@ -50,5 +50,29 @@ describe('isDeadNode (issue #5 dead-code hardening)', () => {
 	it('counts any non-contains connectivity as alive even with weight 0-ish entries', () => {
 		const file = makeCodeNode('lib/x.py', 'python', 'py');
 		expect(isDeadNode(file, fanIn([['lib/x.py', 0]]), fanOut([['lib/x.py', 1]]))).toBe(false);
+	});
+});
+
+describe('collectDeadFileIds (panel navigator)', () => {
+	it('lists only orphaned code files, sorted, ignoring notes and symbols', () => {
+		const nodes = {
+			'z-orphan/a.py': makeCodeNode('z-orphan/a.py', 'python', 'py'),
+			'alive/b.py': makeCodeNode('alive/b.py', 'python', 'py', ),
+			'entry/c.ts': makeCodeNode('entry/c.ts', 'typescript', 'ts'),
+			'orphan/d.py': makeCodeNode('orphan/d.py', 'python', 'py'),
+			notes: makeNoteNode('notes/d.md'),
+			sym: makeSymbolNode('orphan/d.py', 'helper', 'function', 1, 'orphan/d.py'),
+		};
+		const fi = fanIn([['alive/b.py', 1]]);
+		const fo = fanOut([['alive/b.py', 1], ['entry/c.ts', 1]]);
+		expect(collectDeadFileIds(nodes, fi, fo)).toEqual([
+			'orphan/d.py',
+			'z-orphan/a.py',
+		]);
+	});
+
+	it('returns an empty list when everything is connected', () => {
+		const nodes = { 'a.py': makeCodeNode('a.py', 'python', 'py') };
+		expect(collectDeadFileIds(nodes, fanIn([['a.py', 1]]), fanOut([]))).toEqual([]);
 	});
 });
