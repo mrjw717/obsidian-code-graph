@@ -1293,6 +1293,9 @@ export class CodeGraphView extends ItemView {
 				group.enabled = !group.enabled;
 				void this.plugin.saveSettings();
 				row.toggleClass('is-on', group.enabled);
+				// Re-render so the aura hint tracks enabled-group matches,
+				// then redraw so aura changes hit the canvas immediately.
+				this.renderPanel();
 				this.updateVisible();
 			};
 
@@ -1618,8 +1621,9 @@ export class CodeGraphView extends ItemView {
 		});
 		// Zone auras color nothing in their default source mode ('groups')
 		// when group queries match zero indexed nodes (auto-seeded domain
-		// groups reference vocabulary only stamped by `Seed domains`). The
-		// canvas falls back to community zones — surface that in the panel.
+		// groups reference vocabulary only stamped by `Seed domains`).
+		// Surface that instead of a silent empty state; the canvas itself
+		// draws no auras until a group matches (issue #5).
 		const auraModel = this.plugin.graphModel;
 		const groupMatchesExist =
 			!!auraModel &&
@@ -1630,7 +1634,7 @@ export class CodeGraphView extends ItemView {
 		if (s.showZones && s.zoneColorMode === 'groups' && !groupMatchesExist) {
 			parent.createSpan({
 				cls: 'code-graph-hint is-inline',
-				text: 'Aura source is Groups, but no enabled group matches indexed files — zones use auto-detected community clusters right now. Seed domains or add a matching group to pin the coloring.',
+				text: 'Aura source is Groups, but no enabled group matches indexed files — zones stay off until a group matches. Switch the auras selector to Auto to color by detected community instead.',
 			});
 		}
 		this.renderNodeLegendRow(parent, {
@@ -2486,36 +2490,29 @@ export class CodeGraphView extends ItemView {
 				!!model &&
 				Object.values(model.nodes).some((n) => n.domain);
 			const groupsMode = s.zoneColorMode === 'groups';
-			// A group query can match zero indexed nodes (e.g. auto-seeded
-			// `domain:x` groups for vocabulary that was never stamped) — then
-			// the groups color nothing at all. Treat as no matches and fall
-			// back to auto-detected communities (issue #5).
-			let groupMatchesFound = false;
-			if (groupsMode && activeGroups.length > 0 && model) {
-				for (const node of Object.values(model.nodes)) {
-					if (activeGroups.some((g) => matchesColorGroup(node, g.query))) {
-						groupMatchesFound = true;
-						break;
-					}
-				}
-			}
-			const groupsActive = groupsMode && groupMatchesFound;
-			const communityFallback = groupsMode && !groupsActive;
+			// Groups mode follows the user's toggles exactly: only enabled
+			// groups with matches color auras. Earlier builds auto-fell back
+			// to community clusters when no group matched — that made the
+			// group toggles feel broken (off → auras stayed), so a
+			// zero-match groups mode now draws no auras; the panel hint
+			// points at the Auto (community) source instead (issue #5).
+			const groupsActive = groupsMode && activeGroups.length > 0;
 			const commActive =
-				(s.zoneColorMode === 'community' || communityFallback) && drawCommunities;
+				s.zoneColorMode === 'community' && drawCommunities;
 			if (!domainHasAny && !groupsActive && !commActive) return;
 
 			const scale = this.network?.getScale() ?? 1;
 			// Heatmap look: tight, screen-stable radii. radius = px/scale keeps
-			// a constant ~44px screen footprint; the tiny floor guards against
-			// degenerate arcs at extreme zoom. (Was max(30, 80/scale) — a
-			// 160px-diameter bloom that fogged the graph at every zoom level.)
-			const blobRadius = Math.max(4, 44 / scale);
+			// a constant ~44px screen footprint at overview zoom. Per node, the
+			// blob must also stay wider than the node's own on-screen radius
+			// (see zoneBlobRadius below) — otherwise the glow hides under the
+			// dot when zoomed in (user report 2026-11-05).
+			const baseBlobRadius = Math.max(4, 44 / scale);
 
 			// Singleton communities (an isolated node, no edges) keep their own
-			// community label. Getting the same 80px blob as a real cluster
-			// reads as a disproportionate halo around a lone dot — shrink and
-			// dim those auras (review polish, issue #5).
+			// community label. Getting the same blob as a real cluster reads as
+			// a disproportionate halo around a lone dot — shrink and dim those
+			// auras (review polish, issue #5).
 			let communitySizes: Map<number, number> | null = null;
 			if (commActive && drawCommunities && this.cachedCommunityLabels) {
 				communitySizes = new Map();
@@ -2523,6 +2520,15 @@ export class CodeGraphView extends ItemView {
 					communitySizes.set(label, (communitySizes.get(label) ?? 0) + 1);
 				}
 			}
+
+			// Blob radius shrinks never below ~1.8× the node's screen radius:
+			// nodeBaseSize is in graph units, so at high zoom the node's
+			// screen size grows and a fixed blob would be swallowed by the
+			// dot; at low zoom the heatmap base wins and stays screen-stable.
+			const zoneBlobRadius = (id: string): number => {
+				const nodeUnits = Math.max(this.nodeBaseSize.get(id) ?? 6, 4);
+				return Math.max(baseBlobRadius, nodeUnits * scale * 1.8);
+			};
 
 			const positions = this.network?.getPositions();
 			if (!positions) return;
@@ -2575,27 +2581,27 @@ export class CodeGraphView extends ItemView {
 					: undefined;
 				const isSingleton =
 					label !== undefined && communitySizes?.get(label) === 1;
-				const radius = isSingleton ? blobRadius * 0.6 : blobRadius;
+				const radius =
+					zoneBlobRadius(id) * (isSingleton ? 0.6 : 1);
 
 				if (useGradient) {
 					// High-detail: radial gradient (small graphs only).
-					// Heatmap profile: hot core that decays fast, rather than a
-					// linear fade to the edge — center reads dense, edges stay
-					// clean, and additive blending stacks overlapping cores into
-					// heat-like hotspots. Singleton auras keep the same profile
-					// at ~half intensity so lone dots don't glow big.
-					const core = isSingleton ? 0.08 : 0.15;
+					// Crisp heat-disk profile — a flat bright core that holds
+					// most of the radius, then a quick drop at the edge. Over
+					// additive blending this reads as defined heat disks
+					// stacking into hotspots, not a soft blur. Singleton auras
+					// keep the profile at ~half intensity.
+					const core = isSingleton ? 0.10 : 0.20;
 					const grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, radius);
 					grad.addColorStop(0, colorToRgba(color, core));
-					grad.addColorStop(0.3, colorToRgba(color, core * 0.6));
-					grad.addColorStop(0.65, colorToRgba(color, core * 0.2));
-					grad.addColorStop(1, colorToRgba(color, 0));
+					grad.addColorStop(0.45, colorToRgba(color, core * 0.85));
+					grad.addColorStop(0.8, colorToRgba(color, core * 0.35));
+					grad.addColorStop(1, colorToRgba(color, core * 0.08));
 					ctx.fillStyle = grad;
 				} else {
 					// Cheap LOD: solid semi-transparent circle — no gradient
-					// allocation, 5× faster on GPU. Kept smaller/dimmer than the
-					// old 0.04 80px blob so >500-node graphs don't fog up.
-					ctx.fillStyle = colorToRgba(color, isSingleton ? 0.02 : 0.05);
+					// allocation, 5× faster on GPU
+					ctx.fillStyle = colorToRgba(color, isSingleton ? 0.03 : 0.07);
 				}
 				ctx.beginPath();
 				ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);

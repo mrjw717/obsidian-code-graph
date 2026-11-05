@@ -25,19 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   centroid as its center, flinging orphans up to thousands of px off-screen —
   the ring is now centered on the graph's bounding box and the camera
   re-fits after placement, so all orphans render in-frame.
-- **Zone auras hardened against silent no-op and retuned as a heatmap
-  (issue #5).** The default aura source ("Groups") drew nothing when enabled
-  color groups matched zero indexed nodes (e.g. auto-seeded domain groups
-  whose vocabulary was never stamped) — same symptom as "broken". The canvas
-  now falls back to auto-detected community clusters and a panel hint
-  explains the fallback in the Display section. After multi-zoom visual
-  review (fit / 1× / 2.5×), the blob was rebuilt from a wide linear-fade
-  bloom into a tight heatmap profile: ~44px screen-stable radius (was
-  80px), center alpha 0.15 with a steep 4-stop falloff (0.6 / 0.2 / 0) so
-  cores read dense and edges stay clean; additive blending stacks
-  overlapping cores into heat-like hotspots. Singleton communities
-  (isolated one-node clusters) draw at ~60% radius and half intensity so
-  lone dots don't glow like real clusters.
+- **Zone auras: heatmap retune + toggle semantics fixed (issue #5).** The
+  default aura source ("Groups") previously auto-fell back to community
+  clusters when no enabled group matched — which made the group toggles feel
+  dead (turning a group off changed nothing about auras). Groups mode now
+  follows the toggles exactly: auras draw only for enabled, matching
+  groups; zero matches draws no auras and the panel hint points at the Auto
+  (community) source instead of a silent empty state. Blob rendering was
+  rebuilt from a soft linear bloom into a crisp heat-disk profile: flat
+  bright core (alpha 0.20) holding most of the disk, quick drop at the
+  edge, ~44px screen-stable radius at overview zoom that grows to stay
+  ~1.8× the node's own on-screen radius when zoomed in (a fixed blob
+  disappeared under the dot at close zoom). Singleton communities draw at
+  60% radius and half intensity. Verified live via canvas pixel sampling:
+  group on → group-colored aura; group off → aura gone (black); Auto mode →
+  community colors.
 - **Dead-code halo retuned for legibility (issue #5).** Halo center alpha
   raised 0.32 → 0.38 after an independent visual review, so the red glow
   stays readable over the aura drawn behind it.

@@ -232,3 +232,28 @@ vault (build 1.0.10-dev):
   same `ColorGroup.color` field, so a color change applies to all three
   consistently; enabling/disabling a group is evaluated per frame with no
   persistence gap.
+
+### Verification addendum — user critiques round 2 (2026-11-05, later)
+
+Three critiques from live use, each fixed and re-verified in this vault:
+
+- **"Hard to see when zoomed in."** A screen-stable 44px blob shrinks
+  relative to the node as you zoom (the node's own radius grows on screen),
+  so the glow ended up hidden under the dot. The blob radius is now
+  per-node: `max(44px screen-stable base, ~1.8× the node's on-screen
+  radius)`, reading as a halo/heat disk at every zoom level.
+- **"I don't like the soft feel."** The gradual gradient read as a blur.
+  Replaced with a crisp heat-disk: flat core (alpha 0.20) holding ~45% of
+  the radius, ×0.85 at mid, ×0.35 at 80%, ×0.08 at the rim — defined disks
+  under additive blending instead of fog. Solid-circle LOD alpha 0.05 → 0.07.
+- **"When I turn groups off the auras don't disappear."** Root cause: the
+  earlier zero-match auto-fallback to community clusters meant groups-mode
+  auras were always on, so group toggles appeared broken. Groups mode now
+  follows the toggles exactly — no auras on zero match; the panel hint tells
+  the user to switch the auras selector to Auto (community) for
+  auto-clustering instead. Panel re-renders on toggle so the hint tracks
+  enabled groups. E2E pixel sampling on a `path:php` node (build reloaded,
+  then settings restored): group on → rgb(255,32,32) group red; group off →
+  rgb(0,0,0) nothing; Auto mode → rgb(214,52,142) community color. Also
+  removed an earlier e2e test group that had leaked into the vault's saved
+  settings (`path:php`).
