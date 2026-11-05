@@ -5,9 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.10] — 2026-11-05
 
-### Fixed
+### Fixed (issue #5 — dead-code visibility, zone auras & auto-seed groups)
 
 - **Dead-code highlight hardened against false positives (issue #5).** The red
   ring now means "true orphan": a node with zero incoming AND zero outgoing
@@ -84,7 +84,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Java static-member imports (`import static pkg.Class.member`) now resolve
   by their class segment (previously the member name was tried and missed).
 
-### Fixed
+### Fixed (issue #4 — import resolution)
 
 - Imports from modules living under roots invisible to static analysis now resolve
   through a conservative file-index fallback (unique name match only; ambiguous
