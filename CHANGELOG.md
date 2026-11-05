@@ -25,14 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   centroid as its center, flinging orphans up to thousands of px off-screen —
   the ring is now centered on the graph's bounding box and the camera
   re-fits after placement, so all orphans render in-frame.
-- **Zone auras hardened against silent no-op and tuned for legibility (issue
-  #5).** The default aura source ("Groups") drew nothing when enabled color
-  groups matched zero indexed nodes (e.g. auto-seeded domain groups whose
-  vocabulary was never stamped) — same symptom as "broken". The canvas now
-  falls back to auto-detected community clusters and a panel hint explains
-  the fallback in the Display section. Aura blobs were retuned after visual
-  review: 0.06 center alpha read as invisible, 0.12 washed out dense
-  regions — landed on 0.10 (0.04 for the cheap solid-circle LOD path).
+- **Zone auras hardened against silent no-op and retuned as a heatmap
+  (issue #5).** The default aura source ("Groups") drew nothing when enabled
+  color groups matched zero indexed nodes (e.g. auto-seeded domain groups
+  whose vocabulary was never stamped) — same symptom as "broken". The canvas
+  now falls back to auto-detected community clusters and a panel hint
+  explains the fallback in the Display section. After multi-zoom visual
+  review (fit / 1× / 2.5×), the blob was rebuilt from a wide linear-fade
+  bloom into a tight heatmap profile: ~44px screen-stable radius (was
+  80px), center alpha 0.15 with a steep 4-stop falloff (0.6 / 0.2 / 0) so
+  cores read dense and edges stay clean; additive blending stacks
+  overlapping cores into heat-like hotspots. Singleton communities
+  (isolated one-node clusters) draw at ~60% radius and half intensity so
+  lone dots don't glow like real clusters.
 - **Dead-code halo retuned for legibility (issue #5).** Halo center alpha
   raised 0.32 → 0.38 after an independent visual review, so the red glow
   stays readable over the aura drawn behind it.

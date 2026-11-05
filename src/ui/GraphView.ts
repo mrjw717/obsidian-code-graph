@@ -2506,7 +2506,23 @@ export class CodeGraphView extends ItemView {
 			if (!domainHasAny && !groupsActive && !commActive) return;
 
 			const scale = this.network?.getScale() ?? 1;
-			const blobRadius = Math.max(30, 80 / scale);
+			// Heatmap look: tight, screen-stable radii. radius = px/scale keeps
+			// a constant ~44px screen footprint; the tiny floor guards against
+			// degenerate arcs at extreme zoom. (Was max(30, 80/scale) — a
+			// 160px-diameter bloom that fogged the graph at every zoom level.)
+			const blobRadius = Math.max(4, 44 / scale);
+
+			// Singleton communities (an isolated node, no edges) keep their own
+			// community label. Getting the same 80px blob as a real cluster
+			// reads as a disproportionate halo around a lone dot — shrink and
+			// dim those auras (review polish, issue #5).
+			let communitySizes: Map<number, number> | null = null;
+			if (commActive && drawCommunities && this.cachedCommunityLabels) {
+				communitySizes = new Map();
+				for (const label of this.cachedCommunityLabels.values()) {
+					communitySizes.set(label, (communitySizes.get(label) ?? 0) + 1);
+				}
+			}
 
 			const positions = this.network?.getPositions();
 			if (!positions) return;
@@ -2554,25 +2570,35 @@ export class CodeGraphView extends ItemView {
 				const color = zoneColorFor(id);
 				if (!color) continue;
 
+				const label = communitySizes
+					? this.cachedCommunityLabels?.get(id)
+					: undefined;
+				const isSingleton =
+					label !== undefined && communitySizes?.get(label) === 1;
+				const radius = isSingleton ? blobRadius * 0.6 : blobRadius;
+
 				if (useGradient) {
-					// High-detail: radial gradient (small graphs only)
-					const grad = ctx.createRadialGradient(
-						pos.x, pos.y, 0,
-						pos.x, pos.y, blobRadius,
-					);
-					// Landing alpha: 0.06 was invisible even over additive
-					// blending; 0.12 washed out dense regions — 0.10 reads as a
-					// soft glow at fit zoom without burying the graph (issue #5).
-					grad.addColorStop(0, colorToRgba(color, 0.10));
+					// High-detail: radial gradient (small graphs only).
+					// Heatmap profile: hot core that decays fast, rather than a
+					// linear fade to the edge — center reads dense, edges stay
+					// clean, and additive blending stacks overlapping cores into
+					// heat-like hotspots. Singleton auras keep the same profile
+					// at ~half intensity so lone dots don't glow big.
+					const core = isSingleton ? 0.08 : 0.15;
+					const grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, radius);
+					grad.addColorStop(0, colorToRgba(color, core));
+					grad.addColorStop(0.3, colorToRgba(color, core * 0.6));
+					grad.addColorStop(0.65, colorToRgba(color, core * 0.2));
 					grad.addColorStop(1, colorToRgba(color, 0));
 					ctx.fillStyle = grad;
 				} else {
 					// Cheap LOD: solid semi-transparent circle — no gradient
-					// allocation, 5× faster on GPU
-					ctx.fillStyle = colorToRgba(color, 0.04);
+					// allocation, 5× faster on GPU. Kept smaller/dimmer than the
+					// old 0.04 80px blob so >500-node graphs don't fog up.
+					ctx.fillStyle = colorToRgba(color, isSingleton ? 0.02 : 0.05);
 				}
 				ctx.beginPath();
-				ctx.arc(pos.x, pos.y, blobRadius, 0, Math.PI * 2);
+				ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
 				ctx.fill();
 			}
 

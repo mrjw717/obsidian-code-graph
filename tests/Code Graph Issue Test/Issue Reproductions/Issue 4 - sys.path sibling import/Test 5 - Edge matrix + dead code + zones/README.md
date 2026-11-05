@@ -201,3 +201,34 @@ this vault (plugin build 1.0.10-dev, reloaded and re-tested via CDP):
   legend rows and the aura hint are styled via `styles.css` classes
   (`code-graph-node-preview.is-dead`, `code-graph-hint.is-inline`) instead
   of inline style writes.
+
+### Verification addendum — heat retune + group→aura color E2E (2026-11-05)
+
+Follow-up polish submitted after the first addendum, verified live in this
+vault (build 1.0.10-dev):
+
+- **Deferred singleton polish applied.** Community labels with exactly one
+  member (isolated nodes) now draw at 60% radius and half intensity;
+  verified in-vault: 54 communities, 19 singleton labels, all of them the
+  edge-less nodes — singleton halos no longer dwarf lone dots.
+- **Heatmap retune.** User critique of the first tuning: too bloomy and
+  spread out at every zoom. The blob was rebuilt as a heatmap profile —
+  ~44px screen-stable radius (was ~80px), center alpha 0.15 with a steep
+  4-stop falloff (×0.6 / ×0.2 / 0) so cores read dense and the edge is
+  clean; overlapping cores stack into heat hotspots. Zoom sweep critiqued
+  at fit / 1× / 2.5×: fit shows compact hotspots with clean separation,
+  mid-zoom pins a tight glow to matched nodes (merging with the group-tinted
+  node fill), close zoom shows no fog with blobs staying screen-stable.
+- **Group color → aura linkage E2E-tested, not just eyeballed.** Pixel
+  sampled
+  from the composited graph canvases at a node matched by a temporary
+  `path:php` test group (red `#ff2020`, an exclusive match for that node):
+  baseline rgb(255,30,30) — group red; after changing the group color to
+  `#2244ff` live: rgb(35,70,255) — group blue (settings are read per frame,
+  no stale cache); after disabling the group: rgb(208,47,136) — the
+  community-fallback color for that node, proving both the color linkage and
+  the disabled-group path. Settings were restored afterwards. Gap analysis
+  of the wiring: aura color, legend dot, and node-fill override all read the
+  same `ColorGroup.color` field, so a color change applies to all three
+  consistently; enabling/disabling a group is evaluated per frame with no
+  persistence gap.
