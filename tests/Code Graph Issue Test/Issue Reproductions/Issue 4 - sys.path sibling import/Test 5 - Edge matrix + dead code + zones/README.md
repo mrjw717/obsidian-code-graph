@@ -334,3 +334,30 @@ reindex → view refresh → panel hint → aura render.
 - Pressing the button stamps domains even when all groups already exist
   (by design — it is the fix path for a vault whose groups predate
   correct stamping), and writes remain visible via the Notice.
+
+### Forces sliders — full E2E test record (2026-11-05, later)
+
+Driven through the real panel DOM (section expanded, sliders set, events
+dispatched), with assertions against vis-network's live `physics.options`,
+the edge DataSet rest lengths, persisted `data.json`, and a final restore:
+
+| Slider | Driven to | Expected wiring | Verified |
+|---|---|---|---|
+| Center | 100 | `centralGravity = v/100` → 1.0 | PASS (0→1) |
+| Repel | 0 / 100 | `gravitationalConstant = -(v/100)×12000` | PASS (0, -12000) |
+| Link | 0 | `springConstant = (v/100)×0.5` | PASS (0) |
+| Distance | 300 | `springLength = v` | PASS (300) |
+| Stretch | 300 (3.0) | per-edge rest lengths ÷/× factor | PASS — with Distance left at 300: intra 100, cross 900 (73 visible edges) |
+| Labels | 0 | `labelFadeZoom = v/100` | PASS (0) |
+| Cluster + threshold | ON, th=5 | hub clustering collapses visible nodes | PASS (77 → 72 displaced nodes) |
+
+- All values persisted to `data.json` on the slider `change` event.
+- Restoring defaults returned physics to baseline exactly
+  (g -7200 / cg 0.3 / sc 0.25 / sl 110) and a screenshot confirms the
+  layout re-converged.
+- Visual evidence: `forces_repel100_spread.png` (Repel 100 + Center 100 —
+  the graph flies apart) and `forces_restored_final.png`.
+- Test-harness note: `.code-graph-section` bodies are not rendered while a
+  section is collapsed (`renderSection` skips the body) — sliders only
+  exist in the DOM when their section is expanded. No product bug; both
+  scripted UI drivers and users must expand the section first.
