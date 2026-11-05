@@ -257,3 +257,22 @@ Three critiques from live use, each fixed and re-verified in this vault:
   rgb(0,0,0) nothing; Auto mode → rgb(214,52,142) community color. Also
   removed an earlier e2e test group that had leaked into the vault's saved
   settings (`path:php`).
+
+### Verification addendum — user critique round 3: "no auras even when all are on" (2026-11-05, later)
+
+Root cause found and fixed, verified live in this vault (CDP drive):
+
+- **Gap**: "Auto-seed groups" created the five `domain:*` color groups but
+  nothing stamped domains into files, so every seeded group matched zero
+  indexed nodes. With the corrected toggle semantics, groups mode with
+  zero matches correctly drew no auras — leaving only the dead-code halos
+  visible ("i see dead code aura").
+- **Fix**: the button now stamps the discovered domains (via the same
+  discovery + apply pipeline as the "Seed domains" command, without the
+  modal) into files lacking an existing domain, then reindexes. Never
+  overwrites an existing domain.
+- **Result**: model domain stamping went 0 → 60 files; the five existing
+  groups (web/php/c/test-5/ambiguous) match their files and draw auras in
+  the user's group colors (screenshot `auras_after_seed.png` in evidence).
+  Any vault with auto-seeded groups can get the same result by pressing
+  Auto-seed groups once.

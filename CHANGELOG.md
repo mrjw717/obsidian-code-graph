@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   60% radius and half intensity. Verified live via canvas pixel sampling:
   group on → group-colored aura; group off → aura gone (black); Auto mode →
   community colors.
+- **`domain:` groups now actually match: Auto-seed groups stamps the
+  domains it discovers (issue #5).** "Auto-seed groups" created `domain:x`
+  color groups but nothing stamped the domains into files, so in Groups
+  mode every seeded group matched zero nodes — with zero-match auras off,
+  the panel showed groups ON with no auras at all (user report:
+  "still seeing NO auras even when all are on"). The button now completes
+  its job: after creating the groups it stamps the discovered domains
+  (only files without an existing `@domain` header; existing domains are
+  never overwritten without explicit confirmation) and reindexes, so the
+  seeded groups light up in their own colors immediately. Files with
+  domains but no groups also gain match-capable vocab. The zero-match
+  panel hint now points at Auto-seed groups as a fix.
 - **Dead-code halo retuned for legibility (issue #5).** Halo center alpha
   raised 0.32 → 0.38 after an independent visual review, so the red glow
   stays readable over the aura drawn behind it.

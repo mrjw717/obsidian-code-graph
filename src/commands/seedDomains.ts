@@ -144,6 +144,33 @@ export function discoverDomains(
 	return counts;
 }
 
+/**
+ * Stamp the discovered domains into files and reindex so `domain:` color
+ * groups actually match. Only files WITHOUT an existing @domain header are
+ * stamped; files with a different existing domain are left alone (no
+ * overwrite without explicit user confirmation). This is what the
+ * "Auto-seed groups" button runs — without the stamping step, the seeded
+ * `domain:x` groups match zero indexed files and zone auras stay dark,
+ * which read as broken (user report 2026-11-05).
+ */
+export async function stampDiscoveredDomains(
+	plugin: CodeGraphPlugin,
+): Promise<void> {
+	const model = plugin.graphModel;
+	if (!model || Object.keys(model.nodes).length === 0) {
+		new Notice(
+			'Code graph: nothing indexed yet — open the graph view or reindex first.',
+		);
+		return;
+	}
+	const assignments = discover(plugin, model);
+	if (assignments.size === 0) {
+		new Notice('Code graph: no assignable code files found.');
+		return;
+	}
+	await runApply(plugin, assignments, new Map(), new Set());
+}
+
 /** Build the per-file assignment map from the graph model + community detection. */
 function discover(
 	plugin: CodeGraphPlugin,

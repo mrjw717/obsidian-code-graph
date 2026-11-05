@@ -9,7 +9,7 @@ import type CodeGraphPlugin from '../main';
 import { VIEW_TYPE_CODE_GRAPH } from '../main';
 import type { NodeSizingMode, ColorMode, ColorGroup } from '../settings';
 import { applyFolderClustering, applyCommunityClustering, folderKey } from './clustering';
-import { discoverDomains } from '../commands/seedDomains';
+import { discoverDomains, stampDiscoveredDomains } from '../commands/seedDomains';
 import { drawEdgeAnimation, shouldAnimateEdges } from './edgeAnimation';
 import type { EdgeAnimInfo } from './edgeAnimation';
 import { computeHoverSizeUpdates, focusedBaseSize } from './hoverFocus';
@@ -1351,8 +1351,8 @@ export class CodeGraphView extends ItemView {
 			cls: 'code-graph-group-add-btn',
 			text: 'Auto-seed groups',
 		});
-		seedBtn.title = 'Discover domains from the indexed graph and create color groups for each. Self-evolving from code structure.';
-		seedBtn.onclick = () => {
+		seedBtn.title = 'Discover domains from the indexed graph, create color groups for each, and stamp the domains into files (only files without an existing domain are touched). Self-evolving from code structure.';
+		seedBtn.onclick = async () => {
 			const domainCounts = discoverDomains(this.plugin);
 			if (domainCounts.size === 0) {
 				new Notice('No domains discovered — index the codebase first.');
@@ -1380,12 +1380,17 @@ export class CodeGraphView extends ItemView {
 			}
 			if (added > 0) {
 				void this.plugin.saveSettings();
-				this.renderPanel();
-				this.updateVisible();
 				new Notice(`Auto-seeded ${added} color group${added > 1 ? 's' : ''} from detected domains.`);
 			} else {
 				new Notice('All detected domains already have groups.');
 			}
+			// Close the auto-seed loop: create groups → stamp the domains the
+			// groups reference → reindex → auras colored by the group colors
+			// light up. Without stamping, `domain:x` groups match zero files
+			// and groups-mode auras stay dark (user report 2026-11-05).
+			await stampDiscoveredDomains(this.plugin);
+			this.renderPanel();
+			this.updateVisible();
 		};
 
 		// ── Help text ──
@@ -1634,7 +1639,7 @@ export class CodeGraphView extends ItemView {
 		if (s.showZones && s.zoneColorMode === 'groups' && !groupMatchesExist) {
 			parent.createSpan({
 				cls: 'code-graph-hint is-inline',
-				text: 'Aura source is Groups, but no enabled group matches indexed files — zones stay off until a group matches. Switch the auras selector to Auto to color by detected community instead.',
+				text: 'Aura source is Groups, but no enabled group matches indexed files — zones stay off until a group matches. Auto-seed groups stamps detected domains so its groups match, or switch the auras selector to Auto to color by detected community.',
 			});
 		}
 		this.renderNodeLegendRow(parent, {
