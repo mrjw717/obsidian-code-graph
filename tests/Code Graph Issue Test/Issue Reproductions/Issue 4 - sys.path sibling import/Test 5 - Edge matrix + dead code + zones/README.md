@@ -305,21 +305,32 @@ reindex → view refresh → panel hint → aura render.
   `lastModelHash` unchanged (`107:122:1024:134`). Post-fix the hash now
   folds `domain`/`status`/`tags` per node (`107:122:1024:134:86025` vs
   `:84881` for a one-node change) and `renderGraph()` rebuilds.
+- *Notes were never discovered (gap closed).* `discover()` filtered
+  `kind !== 'code'`, so the md frontmatter branch of the stamper was
+  unreachable and notes could not join any `domain:` group. Notes are
+  now seedable; in this vault all 3 notes gained frontmatter
+  `domain: test 5 - edge matrix + dead code + zones` (verified in the
+  model and on disk) and the group's live count went 51 → 54.
+- *Vault-root files were skipped (gap closed).* Files with no folder
+  segment previously left discovery entirely; they now take the same
+  community-merge path as trivial folders (nearest candidate by shared
+  community label), with alphabetical tie-breaking for stable runs.
+- *Palette collisions (gap closed).* Group colors are now chosen via a
+  pure `nextGroupColor()` helper that skips colors already taken by
+  existing groups AND hues within 24° of them (`hexHue`/`hueDist`
+  helpers, unit-tested) — the web/php near-twin oranges can no longer
+  come from auto-seed.
+- *Group rows now show LIVE match counts.* The row count previously
+  displayed the query string; display names freeze seed-time counts
+  ("test 5 ... (47)" vs 51 actually matching). Rows show the current
+  match count per query (web 4 / php 3 / c 3 / test-5 54 / ambiguous 3
+  in the live vault).
+- *Single discovery per click (gap closed).* Button now calls one
+  exported `autoSeedDomains()` (discover once → create groups from the
+  same assignment map → stamp → reindex → notice) instead of
+  `discoverDomains()` + `stampDiscoveredDomains()` (two discoveries).
 
 **Documented gaps (accepted, by design or low impact):**
-- Discovery scans `kind === 'code'` files only: notes never get domain
-  assignments although `runApply` has a frontmatter branch and the modal
-  copy mentions notes — the md branch is currently unreachable. Notes
-  with frontmatter `domain:` set manually still color correctly.
-- Files at the vault root (no folder segment) never receive a domain —
-  `folderDomain()` returns null and candidates only come from folders.
-- Palette colors are assigned by discovery order; two groups may end up
-  with visually similar colors (web `#ff7b00` vs php `#f59e0b`).
-- Group display names freeze the match count at seed time
-  ("test 5 ... (47)") while live matches can drift (51); the query itself
-  is always live.
 - Pressing the button stamps domains even when all groups already exist
   (by design — it is the fix path for a vault whose groups predate
   correct stamping), and writes remain visible via the Notice.
-- `discover()` runs twice per click (counts + stamping); it is
-  deterministic, so the two runs agree.

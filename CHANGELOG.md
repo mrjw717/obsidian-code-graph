@@ -67,6 +67,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stamp) was treated as "no structural change" — group-colored auras and
   node fills kept pre-reindex values until an unrelated edit forced a
   rebuild. Verified live before/after.
+- **Auto-seed groups closed its remaining wiring gaps (issue #5 audit).**
+  Notes are now discovered and stamped via frontmatter `domain:` (the md
+  branch existed but was unreachable); vault-root files merge into the
+  nearest domain by shared community instead of being silently skipped
+  (with deterministic alphabetical tie-breaks); new group colors are
+  chosen to avoid exact-color and near-hue (24°) collisions with existing
+  groups; the GROUPS panel rows show live match counts instead of the
+  query string; and the button runs a single discovery pass end-to-end
+  (`autoSeedDomains`) instead of two. 134 unit tests; live-verified in
+  the test vault (notes stamped, palette-distinct group creation, live
+  counts, auras in group colors).
 - **Dead-code halo retuned for legibility (issue #5).** Halo center alpha
   raised 0.32 → 0.38 after an independent visual review, so the red glow
   stays readable over the aura drawn behind it.

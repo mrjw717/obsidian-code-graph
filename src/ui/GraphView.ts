@@ -9,7 +9,7 @@ import type CodeGraphPlugin from '../main';
 import { VIEW_TYPE_CODE_GRAPH } from '../main';
 import type { NodeSizingMode, ColorMode, ColorGroup } from '../settings';
 import { applyFolderClustering, applyCommunityClustering, folderKey } from './clustering';
-import { discoverDomains, stampDiscoveredDomains } from '../commands/seedDomains';
+import { autoSeedDomains } from '../commands/seedDomains';
 import { drawEdgeAnimation, shouldAnimateEdges } from './edgeAnimation';
 import type { EdgeAnimInfo } from './edgeAnimation';
 import { computeHoverSizeUpdates, focusedBaseSize } from './hoverFocus';
@@ -1286,6 +1286,22 @@ export class CodeGraphView extends ItemView {
 
 	private renderGroupsSection(parent: HTMLElement): void {
 		const s = this.plugin.settings;
+	// Live match counts per query — the group's display name may freeze a
+	// seed-time count ("test 5 ... (47)") while matches drift; the row
+	// shows the CURRENT match count. Recomputed on every renderPanel().
+	const liveCounts = new Map<string, number>();
+	{
+		const model = this.plugin.graphModel;
+		if (model) {
+			for (const group of s.colorGroups) {
+				let count = 0;
+				for (const node of Object.values(model.nodes)) {
+					if (matchesColorGroup(node, group.query)) count++;
+				}
+				liveCounts.set(group.id, count);
+			}
+		}
+	}
 		for (const group of s.colorGroups) {
 			const row = parent.createDiv({
 				cls: `code-graph-legend-row${group.enabled ? ' is-on' : ''}`,
@@ -1299,7 +1315,7 @@ export class CodeGraphView extends ItemView {
 			});
 			row.createSpan({
 				cls: 'code-graph-legend-count',
-				text: group.query,
+				text: String(liveCounts.get(group.id) ?? 0),
 			});
 			const dot = row.createSpan({ cls: 'code-graph-toggle-dot' });
 			dot.style.setProperty('--cg-color', group.color);
@@ -1367,42 +1383,7 @@ export class CodeGraphView extends ItemView {
 		});
 		seedBtn.title = 'Discover domains from the indexed graph, create color groups for each, and stamp the domains into files (only files without an existing domain are touched). Self-evolving from code structure.';
 		seedBtn.onclick = async () => {
-			const domainCounts = discoverDomains(this.plugin);
-			if (domainCounts.size === 0) {
-				new Notice('No domains discovered — index the codebase first.');
-				return;
-			}
-			// Assign each domain a distinct color from a palette
-			const palette = ['#3b82f6', '#f59e0b', '#10b981', '#a855f7', '#ef4444', '#06b6d4', '#ec4899', '#84cc16'];
-			let added = 0;
-			let idx = 0;
-			for (const [domain, count] of domainCounts) {
-				const color = palette[idx % palette.length] ?? '#64748b';
-				idx++;
-				// Skip if a group with this exact query already exists
-				const query = `domain:${domain}`;
-				const exists = s.colorGroups.some((g) => g.query === query);
-				if (exists) continue;
-				s.colorGroups.push({
-					id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-					name: `${domain} (${count})`,
-					query,
-					color,
-					enabled: true,
-				});
-				added++;
-			}
-			if (added > 0) {
-				void this.plugin.saveSettings();
-				new Notice(`Auto-seeded ${added} color group${added > 1 ? 's' : ''} from detected domains.`);
-			} else {
-				new Notice('All detected domains already have groups.');
-			}
-			// Close the auto-seed loop: create groups → stamp the domains the
-			// groups reference → reindex → auras colored by the group colors
-			// light up. Without stamping, `domain:x` groups match zero files
-			// and groups-mode auras stay dark (user report 2026-11-05).
-			await stampDiscoveredDomains(this.plugin);
+			await autoSeedDomains(this.plugin);
 			this.renderPanel();
 			this.updateVisible();
 		};

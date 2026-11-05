@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { stampCodeHeader } from '../src/commands/seedDomains';
+import {
+	stampCodeHeader,
+	nextGroupColor,
+	hexHue,
+	hueDist,
+} from '../src/commands/seedDomains';
 
 describe('stampCodeHeader — idempotency', () => {
 	it('is idempotent: stamping twice produces identical output', () => {
@@ -118,5 +123,43 @@ export function foo() {}
 		// @file and @author preserved
 		expect(stamped).toContain('@file Some file');
 		expect(stamped).toContain('@author Josh');
+	});
+});
+
+describe('nextGroupColor — collision-free palette selection', () => {
+	const PALETTE = [
+		'#3b82f6',
+		'#f59e0b',
+		'#10b981',
+		'#a855f7',
+		'#ef4444',
+		'#06b6d4',
+		'#ec4899',
+		'#84cc16',
+	];
+
+	it('skips colors taken by existing groups', () => {
+		const color = nextGroupColor(PALETTE, ['#3b82f6']);
+		expect(color.toLowerCase()).not.toBe('#3b82f6');
+	});
+
+	it('skips hues visually close to taken colors (≥ 24° apart)', () => {
+		// web (#ff7b00, hue ≈ 25°) vs php (#f59e0b, hue ≈ 38°) collided as
+		// near-twins before — an amber taken color must not yield amber
+		const color = nextGroupColor(PALETTE, ['#f59e0b']);
+		const hue = hexHue(color)!;
+		expect(hueDist(hue, hexHue('#f59e0b')!)).toBeGreaterThanOrEqual(24);
+	});
+
+	it('falls back to an unused color when all hues are close', () => {
+		// take all EXACT colors except one; that one must still be returned
+		const taken = PALETTE.filter((c) => c !== '#06b6d4');
+		expect(nextGroupColor(PALETTE, taken).toLowerCase()).toBe('#06b6d4');
+	});
+
+	it('returns the first palette color when everything is taken', () => {
+		expect(nextGroupColor(PALETTE, PALETTE).toLowerCase()).toBe(
+			PALETTE[0]!.toLowerCase(),
+		);
 	});
 });

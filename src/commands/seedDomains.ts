@@ -126,52 +126,140 @@ function kindNoun(node: GraphNode): string {
 }
 
 /**
- * Discover domains from the indexed graph and return a map of
- * domain name → file count. This is the read-only discovery phase of
- * seedDomains — it doesn't write anything. Used by the graph view's
- * "Auto-seed groups" button to create color groups from detected domains.
+ * One-shot auto-seed: runs discovery ONCE, creates missing `domain:` color
+ * groups (palette colors chosen to avoid collisions with existing groups),
+ * stamps the discovered domains into files (only files WITHOUT an existing
+ * domain; existing domains are never overwritten without explicit user
+ * confirmation — the seed modal handles that flow), and reindexes so
+ * `domain:` groups actually match and aura/node colors light up.
+ *
+ * Replaces the earlier two-call flow (discoverDomains + stampDiscoveredDomains)
+ * which discovered twice per click (issue #5 audit).
  */
-export function discoverDomains(
+export async function autoSeedDomains(
 	plugin: CodeGraphPlugin,
-): Map<string, number> {
-	const model = plugin.graphModel;
-	if (!model || Object.keys(model.nodes).length === 0) return new Map();
-	const assignments = discover(plugin, model);
-	const counts = new Map<string, number>();
-	for (const a of assignments.values()) {
-		counts.set(a.domain, (counts.get(a.domain) ?? 0) + 1);
-	}
-	return counts;
-}
-
-/**
- * Stamp the discovered domains into files and reindex so `domain:` color
- * groups actually match. Only files WITHOUT an existing @domain header are
- * stamped; files with a different existing domain are left alone (no
- * overwrite without explicit user confirmation). This is what the
- * "Auto-seed groups" button runs — without the stamping step, the seeded
- * `domain:x` groups match zero indexed files and zone auras stay dark,
- * which read as broken (user report 2026-11-05).
- */
-export async function stampDiscoveredDomains(
-	plugin: CodeGraphPlugin,
-): Promise<void> {
+): Promise<{ added: number }> {
 	const model = plugin.graphModel;
 	if (!model || Object.keys(model.nodes).length === 0) {
 		new Notice(
 			'Code graph: nothing indexed yet — open the graph view or reindex first.',
 		);
-		return;
+		return { added: 0 };
 	}
 	const assignments = discover(plugin, model);
 	if (assignments.size === 0) {
 		new Notice('Code graph: no assignable code files found.');
-		return;
+		return { added: 0 };
 	}
+
+	// Per-domain counts (order-stable: Map iteration = insertion order).
+	const counts = new Map<string, number>();
+	for (const a of assignments.values()) {
+		counts.set(a.domain, (counts.get(a.domain) ?? 0) + 1);
+	}
+
+	const s = plugin.settings;
+	const takenColors = s.colorGroups.map((g) => g.color.toLowerCase());
+	let added = 0;
+	for (const [domain] of counts) {
+		const query = `domain:${domain}`;
+		if (s.colorGroups.some((g) => g.query === query)) continue;
+		const color = nextGroupColor(GROUP_PALETTE, takenColors);
+		takenColors.push(color.toLowerCase());
+		s.colorGroups.push({
+			id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+			name: domain,
+			query,
+			color,
+			enabled: true,
+		});
+		added++;
+	}
+	if (added > 0) {
+		void plugin.saveSettings();
+		new Notice(
+			`Auto-seeded ${added} color group${added > 1 ? 's' : ''} from detected domains.`,
+		);
+	} else {
+		new Notice('All detected domains already have groups.');
+	}
+
 	await runApply(plugin, assignments, new Map(), new Set());
+	return { added };
 }
 
-/** Build the per-file assignment map from the graph model + community detection. */
+// ── Palette selection ───────────────────────────────────────────────────────
+
+const GROUP_PALETTE = [
+	'#3b82f6',
+	'#f59e0b',
+	'#10b981',
+	'#a855f7',
+	'#ef4444',
+	'#06b6d4',
+	'#ec4899',
+	'#84cc16',
+];
+
+/** Extract the hue of a #rrggbb color (0-360) or null if not parseable. */
+export function hexHue(color: string): number | null {
+	const m = /^#([0-9a-f]{6})$/i.exec(color.trim());
+	if (!m?.[1]) return null;
+	const v = parseInt(m[1], 16);
+	const r = ((v >> 16) & 0xff) / 255;
+	const g = ((v >> 8) & 0xff) / 255;
+	const b = (v & 0xff) / 255;
+	const max = Math.max(r, g, b);
+	const min = Math.min(r, g, b);
+	if (max === min) return 0;
+	const d = max - min;
+	let h: number;
+	if (max === r) h = ((g - b) / d) % 6;
+	else if (max === g) h = (b - r) / d + 2;
+	else h = (r - g) / d + 4;
+	h *= 60;
+	return h < 0 ? h + 360 : h;
+}
+
+/** Smallest hue distance between two hues (0-180). */
+export function hueDist(a: number, b: number): number {
+	const d = Math.abs(a - b) % 360;
+	return d > 180 ? 360 - d : d;
+}
+
+/**
+ * Pick a palette color that is unused and hue-distinct from already-taken
+ * colors (≥ 24° apart) so two groups never look alike. Falls back to the
+ * first palette entry that is not exactly taken, then to the first entry.
+ * Pure — unit-testable (issue #5 audit: web/php collided as near-twins).
+ */
+export function nextGroupColor(
+	palette: string[],
+	taken: string[],
+): string {
+	const takenHues = taken
+		.map(hexHue)
+		.filter((h): h is number => h !== null);
+	const distinctlyFree = palette.filter((c) => {
+		const h = hexHue(c);
+		return !taken.includes(c.toLowerCase()) &&
+			(h === null || takenHues.every((t) => hueDist(h, t) >= 24));
+	});
+	if (distinctlyFree.length > 0) return distinctlyFree[0]!;
+	const unused = palette.filter(
+		(c) => !taken.includes(c.toLowerCase()),
+	);
+	return unused[0] ?? palette[0]!;
+}
+
+/**
+ * Build the per-file assignment map from the graph model + community detection.
+ * Covers CODE files and NOTES (notes get frontmatter `domain:`) — matching the
+ * stamping capability, which already had an md frontmatter branch (issue #5
+ * audit: discovery excluded notes, leaving that branch unreachable). Files
+ * with no/trivial folder (vault root) merge into the nearest candidate by
+ * shared community instead of being skipped.
+ */
 function discover(
 	plugin: CodeGraphPlugin,
 	model: { nodes: Record<string, GraphNode>; edges: GraphEdge[] },
@@ -179,33 +267,36 @@ function discover(
 	const s = plugin.settings;
 	const excludes = [...s.excludeFolders, plugin.app.vault.configDir];
 
-	// 1. Gather code nodes (skip notes — those get frontmatter, not headers).
-	const codeNodes: GraphNode[] = [];
-	const codeIds: string[] = [];
+	// 1. Gather seedable nodes.
+	const seedableNodes: GraphNode[] = [];
+	const seedableIds: string[] = [];
 	for (const n of Object.values(model.nodes)) {
-		if (n.kind !== 'code') continue;
-		if (!s.codeExtensions.includes(n.ext ?? '')) continue;
+		const isNote = n.kind === 'note';
+		if (!isNote && n.kind !== 'code') continue;
+		// kind 'note' is exactly markdown per NodeKind — note nodes carry no
+		// `ext`, so no ext check (an ext==='md' test matched zero notes).
+		if (!isNote && !s.codeExtensions.includes(n.ext ?? '')) continue;
 		if (isExcluded(n.path, excludes)) continue;
 		if (isExcludedType(n.path, s.excludeFileTypes)) continue;
-		codeNodes.push(n);
-		codeIds.push(n.id);
+		seedableNodes.push(n);
+		seedableIds.push(n.id);
 	}
-	if (codeNodes.length === 0) return new Map();
+	if (seedableNodes.length === 0) return new Map();
 
 	// 2. Folder heuristic: weight candidate domains by file count.
 	const folderCounts = new Map<string, number>();
 	const fileFolder = new Map<string, string | null>();
-	for (const n of codeNodes) {
+	for (const n of seedableNodes) {
 		const dom = folderDomain(n.path);
 		fileFolder.set(n.id, dom);
 		if (dom) folderCounts.set(dom, (folderCounts.get(dom) ?? 0) + 1);
 	}
 
 	// 3. Cross-reference with community detection.
-	const communityLabels = detectCommunities(model.edges, codeIds);
+	const communityLabels = detectCommunities(model.edges, seedableIds);
 	// group folder-domain → set of community labels it spans
 	const folderCommunities = new Map<string, Set<number>>();
-	for (const n of codeNodes) {
+	for (const n of seedableNodes) {
 		const dom = fileFolder.get(n.id);
 		const label = communityLabels.get(n.id);
 		if (dom === undefined || dom === null || label === undefined) continue;
@@ -233,33 +324,29 @@ function discover(
 		candidateDomains.set(dom, []);
 	}
 
-	// Merge trivial domains into the nearest candidate by shared community overlap.
-	for (const n of codeNodes) {
+	// Merge trivial (or vault-root null-folder) domains into the nearest
+	// candidate by shared community overlap. Ties break alphabetically so
+	// discovery is stable across runs.
+	for (const n of seedableNodes) {
 		const dom = fileFolder.get(n.id);
-		if (dom === undefined || dom === null) continue;
-		if (candidateDomains.has(dom)) {
+		if (dom !== undefined && dom !== null && candidateDomains.has(dom)) {
 			candidateDomains.get(dom)!.push(n.id);
 			continue;
 		}
-		if (TRIVIAL.has(dom)) {
-			// find nearest candidate by shared community
-			const label = communityLabels.get(n.id);
-			let best: string | null = null;
-			let bestOverlap = 0;
-			for (const cand of candidateDomains.keys()) {
-				const candComms = folderCommunities.get(cand);
-				if (!candComms || label === undefined) continue;
-				if (candComms.has(label)) {
-					const overlap = countSharedCommunities(cand, label, folderCommunities);
-					if (overlap > bestOverlap) {
-						bestOverlap = overlap;
-						best = cand;
-					}
-				}
+		if (dom !== undefined && dom !== null && !TRIVIAL.has(dom)) continue;
+		// null (vault root) or trivial folder: find nearest candidate by
+		// shared community; ties break alphabetically for stability
+		const label = communityLabels.get(n.id);
+		let best: string | null = null;
+		for (const cand of candidateDomains.keys()) {
+			const candComms = folderCommunities.get(cand);
+			if (!candComms || label === undefined) continue;
+			if (candComms.has(label) && (best === null || cand < best)) {
+				best = cand;
 			}
-			if (best) candidateDomains.get(best)!.push(n.id);
-			// else: leave untagged (no good match)
 		}
+		if (best) candidateDomains.get(best)!.push(n.id);
+		// else: leave untagged (no good match)
 	}
 
 	// If we have fewer than 3 domains, that's fine — the spec says "3-7" but
@@ -320,15 +407,6 @@ function discover(
 		}
 	}
 	return result;
-}
-
-function countSharedCommunities(
-	cand: string,
-	label: number,
-	folderCommunities: Map<string, Set<number>>,
-): number {
-	const comms = folderCommunities.get(cand);
-	return comms && comms.has(label) ? 1 : 0;
 }
 
 // ── Phase 2: Confirm Modal ──────────────────────────────────────────────────
