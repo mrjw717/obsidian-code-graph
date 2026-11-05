@@ -286,3 +286,40 @@ Root cause found and fixed, verified live in this vault (CDP drive):
   match (web 4, php 3, c 3, test 5 — 51: was 0, ambiguous 3) and auras
   render for every group (evidence `auras_all_groups.png`, copied to this
   folder).
+
+### Audit: auto-seed groups wiring gap analysis (2026-11-05, later)
+
+End-to-end audit: button → discovery → group creation → stamping →
+reindex → view refresh → panel hint → aura render.
+
+**Fixed by the audit (live-verified):**
+- *Model-change hash ignored tag metadata.* `computeModelHash` hashed
+  node/edge counts + lines/todos/weights only. A reindex whose only
+  effect is re-parsing tags (i.e. exactly what stamping produces when
+  files already carried correct headers) produced an identical hash, so
+  `renderGraph()` skipped the rebuild: aura colors (which read the fresh
+  model per frame) recovered only on the next camera/physics redraw, but
+  node fill overrides, the dead-code set and community labels stayed at
+  pre-reindex values far longer. Empirical proof (pre-fix): mutating
+  `node.domain` live and calling `renderGraph()` left
+  `lastModelHash` unchanged (`107:122:1024:134`). Post-fix the hash now
+  folds `domain`/`status`/`tags` per node (`107:122:1024:134:86025` vs
+  `:84881` for a one-node change) and `renderGraph()` rebuilds.
+
+**Documented gaps (accepted, by design or low impact):**
+- Discovery scans `kind === 'code'` files only: notes never get domain
+  assignments although `runApply` has a frontmatter branch and the modal
+  copy mentions notes — the md branch is currently unreachable. Notes
+  with frontmatter `domain:` set manually still color correctly.
+- Files at the vault root (no folder segment) never receive a domain —
+  `folderDomain()` returns null and candidates only come from folders.
+- Palette colors are assigned by discovery order; two groups may end up
+  with visually similar colors (web `#ff7b00` vs php `#f59e0b`).
+- Group display names freeze the match count at seed time
+  ("test 5 ... (47)") while live matches can drift (51); the query itself
+  is always live.
+- Pressing the button stamps domains even when all groups already exist
+  (by design — it is the fix path for a vault whose groups predate
+  correct stamping), and writes remain visible via the Notice.
+- `discover()` runs twice per click (counts + stamping); it is
+  deterministic, so the two runs agree.

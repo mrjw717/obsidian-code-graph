@@ -465,14 +465,28 @@ export class CodeGraphView extends ItemView {
 	private computeModelHash(model: GraphModel): string {
 		let nodeMeta = 0;
 		let edgeMeta = 0;
+		let tagMeta = 0;
 		for (const n of Object.values(model.nodes)) {
 			nodeMeta +=
 				(n.lines ?? 0) +
 				(n.todoCount ?? 0) * 100 +
 				(n.fixmeCount ?? 0) * 10000;
+			// Tag metadata drives colors (domain/status) and tag: groups — a
+			// reindex that only re-parses tags (e.g. stamped @domain headers,
+			// Seed domains) must not be skipped as "no structural change"
+			// (issue #5: auto-seed auras stayed dark after stamp/reindex).
+			if (n.domain) {
+				tagMeta += n.domain.length * 31 + n.domain.charCodeAt(0);
+			}
+			if (n.status) {
+				tagMeta += n.status.length * 17 + n.status.charCodeAt(0);
+			}
+			if (n.tags && n.tags.length > 0) {
+				tagMeta += n.tags.length * 13 + n.tags[0]!.length;
+			}
 		}
 		for (const e of model.edges) edgeMeta += e.weight;
-		return `${Object.keys(model.nodes).length}:${model.edges.length}:${nodeMeta}:${edgeMeta}`;
+		return `${Object.keys(model.nodes).length}:${model.edges.length}:${nodeMeta}:${edgeMeta}:${tagMeta}`;
 	}
 
 	/**

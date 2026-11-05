@@ -61,6 +61,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seeded groups light up in their own colors immediately. Files with
   domains but no groups also gain match-capable vocab. The zero-match
   panel hint now points at Auto-seed groups as a fix.
+- **Reindex with tag-only changes now refreshes the graph (issue #5).** The
+  model-change hash driving the diff update did not include
+  `domain`/`status`/`tags`, so a reindex that only re-parsed tags (seed
+  stamp) was treated as "no structural change" — group-colored auras and
+  node fills kept pre-reindex values until an unrelated edit forced a
+  rebuild. Verified live before/after.
 - **Dead-code halo retuned for legibility (issue #5).** Halo center alpha
   raised 0.32 → 0.38 after an independent visual review, so the red glow
   stays readable over the aura drawn behind it.
