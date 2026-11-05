@@ -52,6 +52,27 @@ package main
 		expect(tags.author).toBe('Bob');
 	});
 
+	it('extracts multi-word @domain (folder-name domains from seedDomains)', () => {
+		const content = `/**
+ * @file T5 hub
+ * @domain test 5 - edge matrix + dead code + zones
+ * @status stable
+ */
+
+const x = 1;
+`;
+		const tags = extractFileTags(content);
+		expect(tags.domain).toBe('test 5 - edge matrix + dead code + zones');
+	});
+
+	it('extracts multi-word @domain on the closing comment line (strips */)', () => {
+		const content = `/* @domain web deployments */
+const y = 2;
+`;
+		const tags = extractFileTags(content);
+		expect(tags.domain).toBe('web deployments');
+	});
+
 	it('counts TODO and FIXME comments', () => {
 		const content = `// @domain test
 // TODO: fix this

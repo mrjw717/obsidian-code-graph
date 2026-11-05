@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   60% radius and half intensity. Verified live via canvas pixel sampling:
   group on → group-colored aura; group off → aura gone (black); Auto mode →
   community colors.
+- **Multi-word `@domain` headers now parse (issue #5).** The tag extractor
+  captured only the first token of a `@domain` tag, while domain discovery
+  and stamping derive multi-word domains from folder names (e.g.
+  "test 5 - edge matrix + dead code + zones" was read back as "test"). Files
+  stamped with such a domain therefore matched none of the auto-seeded
+  groups, so a whole folder-family's group lit nothing up. The extractor
+  (plus seedDomains' own tag matcher) now captures the full tag text and
+  keeps the block comment's closing delimiter intact. Covered by unit
+  tests for multi-word and closing-line cases.
 - **`domain:` groups now actually match: Auto-seed groups stamps the
   domains it discovers (issue #5).** "Auto-seed groups" created `domain:x`
   color groups but nothing stamped the domains into files, so in Groups

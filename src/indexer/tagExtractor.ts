@@ -54,10 +54,14 @@ export function extractFileTags(content: string): FileTags {
 		const line = lines[i];
 		if (!line) continue;
 
-		// @domain tag
-		const domMatch = line.match(/@domain\s+(\S+)/i);
+		// @domain tag. Multi-word domains are supported since stamping derives
+		// them from folder names (e.g. "test 5 - edge matrix + dead code +
+		// zones"); a trailing block-comment close ("*/") is stripped when the
+		// tag sits on the comment's last line.
+		const domMatch = line.match(/@domain\s+(.+)/i);
 		if (domMatch?.[1]) {
-			domain = domMatch[1].toLowerCase();
+			const dom = domMatch[1].replace(/\*\/\s*$/, '').trim();
+			if (dom) domain = dom.toLowerCase();
 		}
 
 		// @status tag

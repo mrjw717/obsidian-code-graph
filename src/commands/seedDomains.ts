@@ -517,9 +517,12 @@ async function runApply(
 
 // ── Phase 3: Header stamping ───────────────────────────────────────────────
 
-/** Tag regexes (case-insensitive, per tagExtractor.ts). Module-level so helpers share them. */
+/** Tag regexes (case-insensitive, per tagExtractor.ts). Module-level so helpers share them.
+ * @domain supports multi-word domains (stamping derives them from folder names);
+ * the lazy capture + lookahead keeps a trailing comment-close delimiter out of
+ * the match so a block comment survives rewriteBlockTags() on the last line. */
 const FILE_RE = /@file\s+(.+)/i;
-const DOM_RE = /@domain\s+(\S+)/i;
+const DOM_RE = /@domain\s+(.+?)(?=\s*\*\/\s*$|\s*$)/i;
 const STATUS_RE = /@status\s+(\w+)/i;
 
 /**

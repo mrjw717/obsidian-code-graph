@@ -276,3 +276,13 @@ Root cause found and fixed, verified live in this vault (CDP drive):
   the user's group colors (screenshot `auras_after_seed.png` in evidence).
   Any vault with auto-seeded groups can get the same result by pressing
   Auto-seed groups once.
+- **Round 4 — "not working for ALL groups": the test-5 group still had 0
+  matches.** Stamping had written `@domain test 5 - edge matrix + dead code
+  + zones` correctly, but the tag extractor's `/@domain\s+(\S+)/` truncated
+  the value at the first space ("test"), so 51 files matched nothing.
+  Fixed the extractor (and the seedDomains matcher) to take the full
+  multi-word tag value, stripping a trailing comment-close delimiter;
+  two unit-test cases added. Re-verified after reindex: all five groups
+  match (web 4, php 3, c 3, test 5 — 51: was 0, ambiguous 3) and auras
+  render for every group (evidence `auras_all_groups.png`, copied to this
+  folder).
