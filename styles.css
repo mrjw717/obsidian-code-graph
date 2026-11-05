@@ -254,6 +254,12 @@ available in the app when your plugin is enabled.
 	flex-shrink: 0;
 }
 
+/* Dead-code legend rows: red dot matching the canvas halo */
+.code-graph-node-preview.is-dead {
+	--cg-color: #ef4444;
+	--cg-size: 9px;
+}
+
 /* --- Label --- */
 
 .code-graph-legend-label {
@@ -389,6 +395,10 @@ available in the app when your plugin is enabled.
 	color: var(--text-muted);
 	font-style: italic;
 	padding: 4px 0;
+}
+
+.code-graph-hint.is-inline {
+	padding: 2px 6px;
 }
 
 /* ===== Action buttons ===== */

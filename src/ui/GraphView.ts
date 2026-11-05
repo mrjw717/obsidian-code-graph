@@ -773,9 +773,7 @@ export class CodeGraphView extends ItemView {
 						const displayName = model?.nodes[id]?.name ?? id;
 						const row = container.createDiv({ cls: 'code-graph-legend-row is-on' });
 						row.title = `${id} — click to zoom to this node`;
-						const preview = row.createDiv({ cls: 'code-graph-node-preview' });
-						preview.style.setProperty('--cg-color', '#ef4444');
-						preview.style.setProperty('--cg-size', '9px');
+						row.createDiv({ cls: 'code-graph-node-preview is-dead' });
 						row.createSpan({ cls: 'code-graph-legend-label', text: displayName });
 						row.onclick = () => {
 							this.network?.focus(id, {
@@ -1618,15 +1616,22 @@ export class CodeGraphView extends ItemView {
 				this.updateVisible();
 			},
 		});
-		// Zone auras draw nothing in their default source mode ('groups') until
-		// the user defines a color group — previously a silent no-op that read
-		// as broken. Surface the state in the panel.
-		if (s.showZones && s.zoneColorMode === 'groups' && !s.colorGroups.some((g) => g.enabled)) {
-			const auraHint = parent.createSpan({
-				cls: 'code-graph-hint',
-				text: 'Aura source is Groups, but no color groups are enabled. Use the Auras selector (Sizing section) → Auto to color zones by detected community, or add a color group.',
+		// Zone auras color nothing in their default source mode ('groups')
+		// when group queries match zero indexed nodes (auto-seeded domain
+		// groups reference vocabulary only stamped by `Seed domains`). The
+		// canvas falls back to community zones — surface that in the panel.
+		const auraModel = this.plugin.graphModel;
+		const groupMatchesExist =
+			!!auraModel &&
+			s.colorGroups.some((g) => g.enabled) &&
+			Object.values(auraModel.nodes).some((n: GraphNode) =>
+				s.colorGroups.filter((g) => g.enabled).some((g) => matchesColorGroup(n, g.query)),
+			);
+		if (s.showZones && s.zoneColorMode === 'groups' && !groupMatchesExist) {
+			parent.createSpan({
+				cls: 'code-graph-hint is-inline',
+				text: 'Aura source is Groups, but no enabled group matches indexed files — zones use auto-detected community clusters right now. Seed domains or add a matching group to pin the coloring.',
 			});
-			auraHint.style.padding = '2px 6px';
 		}
 		this.renderNodeLegendRow(parent, {
 			label: 'Highlight dead code',
@@ -2451,7 +2456,9 @@ export class CodeGraphView extends ItemView {
 						const pos = deadPositions[id];
 						if (!pos) continue;
 						const grad = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, deadRadius);
-						grad.addColorStop(0, 'rgba(239,68,68,0.32)');
+						// 0.32 was washed out by the aura glow underneath; 0.38
+						// keeps halos legible without bleeding (review 2026-11-05).
+						grad.addColorStop(0, 'rgba(239,68,68,0.38)');
 						grad.addColorStop(1, 'rgba(239,68,68,0)');
 						ctx.fillStyle = grad;
 						ctx.beginPath();
@@ -2478,8 +2485,24 @@ export class CodeGraphView extends ItemView {
 				s.zoneColorMode === 'domain' &&
 				!!model &&
 				Object.values(model.nodes).some((n) => n.domain);
-			const groupsActive = s.zoneColorMode === 'groups' && activeGroups.length > 0;
-			const commActive = s.zoneColorMode === 'community' && drawCommunities;
+			const groupsMode = s.zoneColorMode === 'groups';
+			// A group query can match zero indexed nodes (e.g. auto-seeded
+			// `domain:x` groups for vocabulary that was never stamped) — then
+			// the groups color nothing at all. Treat as no matches and fall
+			// back to auto-detected communities (issue #5).
+			let groupMatchesFound = false;
+			if (groupsMode && activeGroups.length > 0 && model) {
+				for (const node of Object.values(model.nodes)) {
+					if (activeGroups.some((g) => matchesColorGroup(node, g.query))) {
+						groupMatchesFound = true;
+						break;
+					}
+				}
+			}
+			const groupsActive = groupsMode && groupMatchesFound;
+			const communityFallback = groupsMode && !groupsActive;
+			const commActive =
+				(s.zoneColorMode === 'community' || communityFallback) && drawCommunities;
 			if (!domainHasAny && !groupsActive && !commActive) return;
 
 			const scale = this.network?.getScale() ?? 1;
@@ -2502,14 +2525,14 @@ export class CodeGraphView extends ItemView {
 				if (s.zoneColorMode === 'domain' && model) {
 					const node = model.nodes[id];
 					if (node?.domain) return domainColor(node.domain);
-				} else if (s.zoneColorMode === 'groups' && activeGroups.length > 0 && model) {
+				} else if (groupsActive && model) {
 					const node = model.nodes[id];
 					if (node) {
 						for (const g of activeGroups) {
 							if (matchesColorGroup(node, g.query)) return g.color;
 						}
 					}
-				} else if (s.zoneColorMode === 'community' && drawCommunities && this.cachedCommunityLabels) {
+				} else if (commActive && drawCommunities && this.cachedCommunityLabels) {
 					const label = this.cachedCommunityLabels.get(id);
 					if (label !== undefined) return communityColor(label);
 				}
@@ -2537,13 +2560,16 @@ export class CodeGraphView extends ItemView {
 						pos.x, pos.y, 0,
 						pos.x, pos.y, blobRadius,
 					);
-					grad.addColorStop(0, colorToRgba(color, 0.06));
+					// Landing alpha: 0.06 was invisible even over additive
+					// blending; 0.12 washed out dense regions — 0.10 reads as a
+					// soft glow at fit zoom without burying the graph (issue #5).
+					grad.addColorStop(0, colorToRgba(color, 0.10));
 					grad.addColorStop(1, colorToRgba(color, 0));
 					ctx.fillStyle = grad;
 				} else {
 					// Cheap LOD: solid semi-transparent circle — no gradient
 					// allocation, 5× faster on GPU
-					ctx.fillStyle = colorToRgba(color, 0.03);
+					ctx.fillStyle = colorToRgba(color, 0.04);
 				}
 				ctx.beginPath();
 				ctx.arc(pos.x, pos.y, blobRadius, 0, Math.PI * 2);

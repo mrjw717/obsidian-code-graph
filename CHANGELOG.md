@@ -25,10 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   centroid as its center, flinging orphans up to thousands of px off-screen —
   the ring is now centered on the graph's bounding box and the camera
   re-fits after placement, so all orphans render in-frame.
-- **Zone auras explained instead of silently empty (issue #5).** The default
-  aura source ("Groups") draws nothing until a color group is enabled — the
-  panel now shows an explanatory hint in the Display section; verified that
-  switching the aura source to Auto renders community halos.
+- **Zone auras hardened against silent no-op and tuned for legibility (issue
+  #5).** The default aura source ("Groups") drew nothing when enabled color
+  groups matched zero indexed nodes (e.g. auto-seeded domain groups whose
+  vocabulary was never stamped) — same symptom as "broken". The canvas now
+  falls back to auto-detected community clusters and a panel hint explains
+  the fallback in the Display section. Aura blobs were retuned after visual
+  review: 0.06 center alpha read as invisible, 0.12 washed out dense
+  regions — landed on 0.10 (0.04 for the cheap solid-circle LOD path).
+- **Dead-code halo retuned for legibility (issue #5).** Halo center alpha
+  raised 0.32 → 0.38 after an independent visual review, so the red glow
+  stays readable over the aura drawn behind it.
 - Java static-member imports (`import static pkg.Class.member`) now resolve
   by their class segment (previously the member name was tried and missed).
 
