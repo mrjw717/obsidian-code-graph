@@ -45,8 +45,15 @@ jobs:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: |
                   tag="${GITHUB_REF#refs/tags/}"
-
-                  gh release create "$tag" \
-                    --title="$tag" \
-                    --notes-file=".github/release-notes.md" \
-                    main.js manifest.json ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
+                  ASSETS="main.js manifest.json ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}"
+                  # Create the release; if it already exists (e.g. the tag was
+                  # re-pointed after a manifest fix), update it in place
+                  # instead of failing the workflow with a tag-collision error.
+                  if ! gh release create "$tag" \
+                      --title="$tag" \
+                      --notes-file=".github/release-notes.md" \
+                      $ASSETS; then
+                      echo "Release $tag already exists — updating assets and notes in place."
+                      gh release upload "$tag" $ASSETS --clobber
+                      gh release edit "$tag" --title="$tag" --notes-file=".github/release-notes.md"
+                  fi
